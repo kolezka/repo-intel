@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "repo-intel",
+  "description": "codegraph + graphify setup, routing hooks and LLM backend control",
+  "owner": { "name": "Mariusz Rakus" },
+  "plugins": [
+    {
+      "name": "repo-intel",
+      "description": "Install codegraph and graphify in a repo and route the agent to them",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}

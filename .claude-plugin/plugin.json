@@ -1,0 +1,8 @@
+{
+  "name": "repo-intel",
+  "version": "0.1.0",
+  "description": "Installs codegraph and graphify in a repository, keeps both graphs fresh, routes the agent to the right one with near-zero hook overhead, and runs graphify's semantic extraction on a configured LLM backend (LiteLLM, Ollama, OpenAI-compatible) instead of agent subagents.",
+  "author": { "name": "Mariusz Rakus" },
+  "repository": "https://github.com/kolezka/repo-intel",
+  "keywords": ["codegraph", "graphify", "knowledge-graph", "hooks", "litellm", "ollama"]
+}

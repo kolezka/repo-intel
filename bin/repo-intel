@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# repo-intel: set up, build and inspect codegraph + graphify for one repository.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: repo-intel <command> [options]
+
+  doctor                     Report tools, config, graphs and duplicate global hooks
+  install [graphify|codegraph|all]
+                             Install missing tools (graphify via uv/pipx, codegraph via pnpm/npm)
+  setup                      In the current git repo: index codegraph, add .gitignore
+                             entries, install graphify git hooks, then build
+  config [--global] --backend B [--model M] [--base-url URL]
+                             Choose the LLM backend for graphify semantic extraction.
+                             B: a graphify provider (see `graphify provider list`),
+                             ollama, openai, claude, gemini, deepseek, kimi,
+                             code-only (no LLM), or agent (Claude Code subagents)
+  config --show              Print the effective config
+  build [--full]             Refresh codegraph and graphify using the configured backend
+  migrate-hooks [--apply]    Remove the global `graphify hook-guard` and
+                             `codegraph prompt-hook` entries this plugin replaces
+                             (dry run unless --apply; backs up settings.json)
+EOF
+}
+
+die() { printf 'repo-intel: %s\n' "$*" >&2; exit 1; }
+info() { printf 'repo-intel: %s\n' "$*"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+repo_root() { git rev-parse --show-toplevel 2>/dev/null || die "not inside a git repository"; }
+user_config() { printf '%s/repo-intel/config.json' "${XDG_CONFIG_HOME:-$HOME/.config}"; }
+settings_file() { printf '%s/settings.json' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; }
+
+# Sets BACKEND, MODEL and BASE_URL from one source, same rule as the hook:
+# env, else the first config file that names a backend (repo root, then user).
+resolve_llm() {
+  local root=${1:-} f
+  BACKEND="" MODEL="" BASE_URL=""
+  if [[ -n ${REPO_INTEL_BACKEND:-} ]]; then
+    BACKEND=$REPO_INTEL_BACKEND MODEL=${REPO_INTEL_MODEL:-}
+    return 0
+  fi
+  for f in ${root:+"$root/.repo-intel.json"} "$(user_config)"; do
+    [[ -f $f ]] || continue
+    jq -e . "$f" >/dev/null 2>&1 || die "$f is not valid JSON"
+    BACKEND=$(jq -r '.llm.backend // empty' "$f")
+    if [[ -n $BACKEND ]]; then
+      MODEL=${REPO_INTEL_MODEL:-$(jq -r '.llm.model // empty' "$f")}
+      BASE_URL=$(jq -r '.llm.base_url // empty' "$f")
+      return 0
+    fi
+  done
+  return 0
+}
+
+# Hook commands this plugin replaces, bare or path-qualified (npx, uvx, /abs/path).
+replaced_hooks='(^|[/[:space:]])graphify hook-guard|(^|[/[:space:]])codegraph prompt-hook'
+
+cmd_doctor() {
+  local ok=0 root settings dup t
+  for t in jq git graphify codegraph; do
+    if have "$t"; then
+      printf '  %-15s %s\n' "$t" "$("$t" --version 2>/dev/null | head -1)"
+    else
+      printf '  %-15s MISSING\n' "$t"; ok=1
+    fi
+  done
+  root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [[ -n $root ]]; then
+    printf '  %-15s %s\n' repo "$root"
+    if [[ -d $root/.codegraph ]]; then printf '  %-15s present\n' codegraph-index
+    else printf '  %-15s none (run: repo-intel setup)\n' codegraph-index; fi
+    if [[ -f $root/graphify-out/graph.json ]]; then printf '  %-15s present\n' graphify-graph
+    else printf '  %-15s none (run: repo-intel build)\n' graphify-graph; fi
+  fi
+  resolve_llm "$root"
+  printf '  %-15s %s\n' backend "${BACKEND:-unset (build indexes code only)}${MODEL:+ / $MODEL}"
+  settings=$(settings_file)
+  if [[ -f $settings ]]; then
+    dup=$(jq -r --arg re "$replaced_hooks" '[.hooks // {} | .[][]? | .hooks[]?.command // empty
+      | select(test($re))] | unique | join(", ")' "$settings")
+    [[ -n $dup ]] && printf '  %-15s duplicate global hooks: %s (run: repo-intel migrate-hooks)\n' hooks "$dup"
+  fi
+  return $ok
+}
+
+cmd_install() {
+  local what=${1:-all}
+  if [[ $what == all || $what == graphify ]] && ! have graphify; then
+    if have uv; then uv tool install graphifyy
+    elif have pipx; then pipx install graphifyy
+    else die "need uv or pipx to install graphify (package: graphifyy)"; fi
+  fi
+  if [[ $what == all || $what == codegraph ]] && ! have codegraph; then
+    if have pnpm; then pnpm add -g @colbymchenry/codegraph
+    elif have npm; then npm install -g @colbymchenry/codegraph
+    else die "need pnpm or npm to install codegraph"; fi
+  fi
+  have jq || info "jq is missing; the hooks stay silent without it (brew install jq)"
+}
+
+ensure_gitignore() {
+  local root=$1 entry
+  for entry in .codegraph/ graphify-out/cache/; do
+    grep -qxF "$entry" "$root/.gitignore" 2>/dev/null || printf '%s\n' "$entry" >> "$root/.gitignore"
+  done
+}
+
+cmd_setup() {
+  local root; root=$(repo_root)
+  have codegraph || die "codegraph missing (run: repo-intel install)"
+  have graphify || die "graphify missing (run: repo-intel install)"
+  ensure_gitignore "$root"
+  [[ -d $root/.codegraph ]] || (cd "$root" && codegraph init -y)
+  (cd "$root" && graphify hook install)
+  cmd_build
+}
+
+cmd_config() {
+  local global=0 show=0 backend="" model="" base_url="" target root
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --global) global=1 ;;
+      --show) show=1 ;;
+      --backend) backend=${2:?--backend needs a value}; shift ;;
+      --model) model=${2:?--model needs a value}; shift ;;
+      --base-url) base_url=${2:?--base-url needs a value}; shift ;;
+      *) die "unknown option: $1" ;;
+    esac
+    shift
+  done
+  root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [[ $show == 1 ]]; then
+    resolve_llm "$root"
+    printf 'backend=%s model=%s base_url=%s\n' "$BACKEND" "$MODEL" "$BASE_URL"
+    return
+  fi
+  [[ -n $backend ]] || die "config needs --backend (or --show)"
+  if [[ -n $base_url ]]; then
+    case $backend in
+      openai|claude|ollama) ;;
+      *) die "--base-url only applies to openai, claude and ollama; a graphify provider keeps its URL in ~/.graphify/providers.json" ;;
+    esac
+  fi
+  if [[ $global == 1 ]]; then
+    target=$(user_config); mkdir -p "$(dirname "$target")"
+  else
+    [[ -n $root ]] || die "not in a git repo; use --global"
+    target=$root/.repo-intel.json
+  fi
+  # Only names and URLs go in the file; API keys stay in the environment.
+  jq -n --arg b "$backend" --arg m "$model" --arg u "$base_url" \
+    '{llm: ({backend: $b} + (if $m != "" then {model: $m} else {} end) + (if $u != "" then {base_url: $u} else {} end))}' \
+    > "$target.tmp" && mv "$target.tmp" "$target"
+  info "wrote $target"
+}
+
+cmd_build() {
+  local root backend model base_url args=()
+  [[ ${1:-} == --full ]] && args+=(--force)
+  root=$(repo_root)
+  resolve_llm "$root"
+  backend=$BACKEND model=$MODEL base_url=$BASE_URL
+
+  if have codegraph; then
+    if [[ -d $root/.codegraph ]]; then (cd "$root" && codegraph sync); else (cd "$root" && codegraph init -y); fi
+  else
+    info "codegraph missing, skipped"
+  fi
+
+  have graphify || die "graphify missing (run: repo-intel install)"
+  case ${backend:-code-only} in
+    agent)
+      info "backend=agent: code structure only here; run /graphify in Claude Code for docs"
+      (cd "$root" && graphify extract . --code-only ${args[@]+"${args[@]}"})
+      return ;;
+    code-only)
+      [[ -z $backend ]] && info "no backend configured, indexing code only (set one: repo-intel config --backend <name>)"
+      (cd "$root" && graphify extract . --code-only ${args[@]+"${args[@]}"})
+      return ;;
+    ollama) args+=(--max-concurrency 1) ;;
+  esac
+  args+=(--backend "$backend")
+  [[ -n $model ]] && args+=(--model "$model")
+  # Point the stock clients at a self-hosted endpoint when one is configured.
+  if [[ -n $base_url ]]; then
+    case $backend in
+      openai) export OPENAI_BASE_URL=$base_url; [[ -n $model ]] && export OPENAI_MODEL=$model ;;
+      claude) export ANTHROPIC_BASE_URL=$base_url; [[ -n $model ]] && export ANTHROPIC_MODEL=$model ;;
+      ollama) export OLLAMA_HOST=$base_url ;;
+    esac
+  fi
+  info "graphify extract on backend=$backend${model:+ model=$model}"
+  (cd "$root" && graphify extract . "${args[@]}")
+  # The session-start hook compares docs changed since this commit.
+  mkdir -p "$root/graphify-out"
+  git -C "$root" rev-parse HEAD > "$root/graphify-out/.repo-intel-built" 2>/dev/null || true
+}
+
+cmd_migrate_hooks() {
+  local apply=0 settings backup found
+  [[ ${1:-} == --apply ]] && apply=1
+  settings=$(settings_file)
+  [[ -f $settings ]] || { info "no $settings"; return 0; }
+  # Edit the real file so a dotfiles symlink stays a symlink.
+  settings=$(realpath "$settings")
+  found=$(jq -r --arg re "$replaced_hooks" '[.hooks // {} | .[][]? | .hooks[]?.command // empty | select(test($re))] | .[]' "$settings")
+  [[ -n $found ]] || { info "no duplicate global hooks"; return 0; }
+  printf 'Global hooks replaced by repo-intel (in %s):\n%s\n' "$settings" "$found"
+  grep -q 'hook-guard read' <<<"$found" && \
+    info "note: hook-guard read (Read/Glob) is dropped, not replaced; repo-intel nudges on searches only"
+  [[ $apply == 1 ]] || { info "dry run; re-run with --apply"; return 0; }
+  backup="$settings.bak-repo-intel-$(date +%Y%m%d%H%M%S)"
+  cp "$settings" "$backup"
+  # Drop matching commands, then groups left empty, then events left empty.
+  jq --arg re "$replaced_hooks" '.hooks |= (
+      map_values(map(.hooks |= map(select((.command // "") | test($re) | not))) | map(select(.hooks | length > 0)))
+      | with_entries(select(.value | length > 0)))' "$backup" > "$settings.tmp"
+  mv "$settings.tmp" "$settings"
+  info "removed; backup at $backup (undo: cp \"$backup\" \"$settings\")"
+}
+
+case ${1:-help} in
+  help|-h|--help) usage; exit 0 ;;
+  install) ;;
+  *) have jq || die "jq is required" ;;
+esac
+cmd=${1:-help}; shift || true
+case $cmd in
+  doctor) cmd_doctor "$@" ;;
+  install) cmd_install "$@" ;;
+  setup) cmd_setup "$@" ;;
+  config) cmd_config "$@" ;;
+  build) cmd_build "$@" ;;
+  migrate-hooks) cmd_migrate_hooks "$@" ;;
+  *) usage; exit 1 ;;
+esac
