@@ -40,6 +40,8 @@ Skills: `/repo-intel:setup`, `/repo-intel:build`, `/repo-intel:route` (which too
 ## LLM backend
 
 `repo-intel build` calls `graphify extract --backend <backend> [--model <model>]`.
+If the repo tracks any `.svelte` files, `build` first adds `*.svelte` to `.graphifyignore`
+(graphify cannot parse Svelte; codegraph already covers it).
 
 | Backend | Notes |
 |---|---|

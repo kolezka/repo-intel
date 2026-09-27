@@ -107,6 +107,20 @@ ensure_gitignore() {
   done
 }
 
+# graphify parses .svelte with the JS grammar and extracts nothing useful from it;
+# codegraph already handles Svelte correctly, so keep graphify off those files.
+ensure_graphifyignore() {
+  local root=$1 entry='*.svelte'
+  # No pipe to grep here: with many tracked files, git's output can exceed the
+  # pipe buffer and SIGPIPE it once grep -q exits early, which pipefail turns
+  # into a false "no matches" and silently skips the ignore entry.
+  [[ -n $(git -C "$root" ls-files -- "$entry" 2>/dev/null) ]] || return 0
+  grep -qxF "$entry" "$root/.graphifyignore" 2>/dev/null || {
+    printf '%s\n' "$entry" >> "$root/.graphifyignore"
+    info "added $entry to .graphifyignore (graphify cannot parse Svelte; codegraph covers it)"
+  }
+}
+
 cmd_setup() {
   local root; root=$(repo_root)
   have codegraph || die "codegraph missing (run: repo-intel install)"
@@ -170,6 +184,7 @@ cmd_build() {
   fi
 
   have graphify || die "graphify missing (run: repo-intel install)"
+  ensure_graphifyignore "$root"
   case ${backend:-code-only} in
     agent)
       info "backend=agent: code structure only here; run /graphify in Claude Code for docs"

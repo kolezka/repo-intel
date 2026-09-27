@@ -213,6 +213,52 @@ git -C "$r2" rev-parse HEAD > "$work/head"
 cmp -s "$work/head" "$r2/graphify-out/.repo-intel-built"
 check "build records the commit it was built from" $? "missing or wrong $r2/graphify-out/.repo-intel-built"
 
+svelte1=$(new_repo svelte1); mkdir -p "$svelte1/src"
+printf '<script>let x = 1;</script>\n' > "$svelte1/src/App.svelte"
+git -C "$svelte1" add -A && git -C "$svelte1" -c user.email=t@t -c user.name=t commit -qm "add svelte"
+(cd "$svelte1" && "$cli" build >/dev/null 2>&1)
+grep -qxF '*.svelte' "$svelte1/.graphifyignore" 2>/dev/null
+check "repo with a tracked .svelte file gets *.svelte in .graphifyignore after build" $? "got: $(cat "$svelte1/.graphifyignore" 2>/dev/null)"
+
+(cd "$svelte1" && "$cli" build >/dev/null 2>&1)
+lines=$(grep -cxF '*.svelte' "$svelte1/.graphifyignore" 2>/dev/null || true)
+check "running build twice leaves exactly one line" "$([ "$lines" = 1 ]; echo $?)" "got $lines line(s): $(cat "$svelte1/.graphifyignore" 2>/dev/null)"
+
+nosvelte=$(new_repo nosvelte)
+(cd "$nosvelte" && "$cli" build >/dev/null 2>&1)
+check "repo without .svelte gets no .graphifyignore" "$([ ! -e "$nosvelte/.graphifyignore" ]; echo $?)" "file exists: $(cat "$nosvelte/.graphifyignore" 2>/dev/null)"
+
+svelte2=$(new_repo svelte-existing-ignore); mkdir -p "$svelte2/src"
+printf '<script>let x = 1;</script>\n' > "$svelte2/src/App.svelte"
+printf 'node_modules/\n' > "$svelte2/.graphifyignore"
+git -C "$svelte2" add -A && git -C "$svelte2" -c user.email=t@t -c user.name=t commit -qm "add svelte"
+(cd "$svelte2" && "$cli" build >/dev/null 2>&1)
+ignore_out=$(cat "$svelte2/.graphifyignore" 2>/dev/null)
+check "an existing .graphifyignore with other lines is preserved" \
+  "$(printf '%s\n' "$ignore_out" | grep -qxF 'node_modules/' && printf '%s\n' "$ignore_out" | grep -qxF '*.svelte'; echo $?)" \
+  "got: $ignore_out"
+
+# Enough tracked .svelte paths to push `git ls-files` past the ~64KB pipe buffer:
+# a `producer | grep -q` pipeline under pipefail turns the resulting SIGPIPE into
+# a false "no matches" and silently skips the ignore entry.
+svelte3=$(new_repo svelte-bigrepo)
+long=$(printf 'x%.0s' $(seq 1 180))
+for i in $(seq 1 400); do
+  d="$svelte3/dir-$long-$i"
+  mkdir -p "$d"
+  printf '<script>let x=1;</script>\n' > "$d/App.svelte"
+done
+git -C "$svelte3" add -A && git -C "$svelte3" -c user.email=t@t -c user.name=t commit -qm "add many svelte files"
+bytes=$(git -C "$svelte3" ls-files -- '*.svelte' | wc -c | tr -d ' ')
+check "test setup: git ls-files output for the big repo exceeds the 64KB pipe buffer" \
+  "$([ "$bytes" -gt 65536 ]; echo $?)" "got $bytes bytes"
+start=$(ms)
+(cd "$svelte3" && "$cli" build >/dev/null 2>&1)
+elapsed=$(( $(ms) - start ))
+grep -qxF '*.svelte' "$svelte3/.graphifyignore" 2>/dev/null
+check "a repo whose git ls-files output exceeds 64KB still gets *.svelte added" $? \
+  "got: $(cat "$svelte3/.graphifyignore" 2>/dev/null); build took ${elapsed} ms"
+
 cat > "$CLAUDE_CONFIG_DIR/settings.json" <<'EOF'
 {"model":"x","hooks":{
  "PreToolUse":[{"matcher":"Bash|Grep","hooks":[{"type":"command","command":"graphify hook-guard search"}]},
