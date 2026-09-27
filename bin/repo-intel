@@ -8,7 +8,7 @@ Usage: repo-intel <command> [options]
 
   doctor                     Report tools, config, graphs and duplicate global hooks
   install [graphify|codegraph|all]
-                             Install missing tools (graphify via uv/pipx, codegraph via pnpm/npm)
+                             Install or upgrade to latest (graphify via uv/pipx, codegraph via pnpm/npm)
   setup                      In the current git repo: index codegraph, add .gitignore
                              entries, install graphify git hooks, then build
   config [--global] --backend B [--model M] [--base-url URL]
@@ -86,16 +86,36 @@ cmd_doctor() {
 }
 
 cmd_install() {
-  local what=${1:-all}
-  if [[ $what == all || $what == graphify ]] && ! have graphify; then
-    if have uv; then uv tool install graphifyy
-    elif have pipx; then pipx install graphifyy
+  local what=${1:-all} v
+  if [[ $what == all || $what == graphify ]]; then
+    # uv resolves `pkg@latest` to the newest release and reinstalls over
+    # whatever is there, so no separate --upgrade/--force is needed.
+    if have uv; then uv tool install graphifyy@latest
+    # pipx has no @latest; `install` on an already-managed venv errors, so
+    # upgrade it instead. `have graphify` alone is not enough: brew, uv or a
+    # manual install can put graphify on PATH without pipx managing it, and
+    # `pipx upgrade` on a package pipx never installed fails with "not
+    # installed". Ask pipx directly.
+    elif have pipx; then
+      if pipx list --short 2>/dev/null | awk '$1 == "graphifyy" { f = 1 } END { exit !f }'; then
+        pipx upgrade graphifyy
+      else pipx install graphifyy; fi
     else die "need uv or pipx to install graphify (package: graphifyy)"; fi
+    if have graphify; then
+      v=$(graphify --version 2>/dev/null || true)
+      [[ -n $v ]] && info "graphify: $v"
+    fi
   fi
-  if [[ $what == all || $what == codegraph ]] && ! have codegraph; then
-    if have pnpm; then pnpm add -g @colbymchenry/codegraph
-    elif have npm; then npm install -g @colbymchenry/codegraph
+  if [[ $what == all || $what == codegraph ]]; then
+    # An explicit @latest always resolves and installs that version, whether
+    # codegraph is new or already on PATH, so this covers install and upgrade.
+    if have pnpm; then pnpm add -g @colbymchenry/codegraph@latest
+    elif have npm; then npm install -g @colbymchenry/codegraph@latest
     else die "need pnpm or npm to install codegraph"; fi
+    if have codegraph; then
+      v=$(codegraph --version 2>/dev/null || true)
+      [[ -n $v ]] && info "codegraph: $v"
+    fi
   fi
   have jq || info "jq is missing; the hooks stay silent without it (brew install jq)"
 }

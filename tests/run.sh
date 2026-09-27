@@ -25,6 +25,38 @@ EOF
 done
 export PATH="$work/fakebin:$PATH"
 
+# Fake installers, one per own directory so a test can compose an install-time
+# PATH from exactly the tools it wants "present", never falling through to the
+# real uv/pipx/pnpm/npm on this machine. Each logs its argv and honours a
+# "<name>.fail" sentinel to simulate a failing install.
+for tool in uv pipx pnpm npm; do
+  mkdir -p "$work/bin-$tool"
+  /bin/cat > "$work/bin-$tool/$tool" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$work/$tool.log"
+[ -f "$work/$tool.fail" ] && exit 1
+exit 0
+EOF
+  chmod +x "$work/bin-$tool/$tool"
+done
+# pipx also answers `list --short`, driven by "$work/pipx.list" (absent or no
+# matching line means pipx does not manage that package).
+/bin/cat > "$work/bin-pipx/pipx" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$work/pipx.log"
+[ -f "$work/pipx.fail" ] && exit 1
+if [ "\$1" = list ] && [ "\$2" = --short ]; then
+  [ -f "$work/pipx.list" ] && /bin/cat "$work/pipx.list"
+fi
+exit 0
+EOF
+chmod +x "$work/bin-pipx/pipx"
+install_path() { # space-separated dirs under $work to expose, e.g. "bin-uv fakebin"
+  local p="/usr/bin:/bin" d
+  for d in "$@"; do p="$work/$d:$p"; done
+  printf '%s' "$p"
+}
+
 ok() { pass=$((pass + 1)); printf '  ok   %s\n' "$1"; }
 ko() { fail=$((fail + 1)); printf '  FAIL %s\n       %s\n' "$1" "$2"; }
 check() { # name, status (0 = pass), detail shown on failure
@@ -241,6 +273,48 @@ check "migrate-hooks finds path-qualified and npx commands" "$(echo "$out" | gre
 check "migrate-hooks keeps a symlinked settings.json a symlink" "$([ -L "$CLAUDE_CONFIG_DIR/settings.json" ]; echo $?)" "symlink replaced"
 jq -e '.hooks == {}' "$work/dotfiles/settings.json" >/dev/null 2>&1
 check "migrate-hooks edits the symlink target" $? "got: $(cat "$work/dotfiles/settings.json")"
+
+echo "install"
+
+rm -f "$work/uv.log"
+out=$(PATH=$(install_path bin-uv fakebin) "$cli" install graphify 2>&1)
+check "uv present: installs the latest, upgrading over an existing fake graphify" \
+  "$(grep -qx 'tool install graphifyy@latest' "$work/uv.log" 2>/dev/null; echo $?)" "got: $(cat "$work/uv.log" 2>/dev/null); output: $out"
+
+rm -f "$work/pipx.log" "$work/pipx.list"
+out=$(PATH=$(install_path bin-pipx) "$cli" install graphify 2>&1)
+check "pipx present, graphify unmanaged and absent: pipx install" \
+  "$(grep -qx 'install graphifyy' "$work/pipx.log" 2>/dev/null; echo $?)" "got: $(cat "$work/pipx.log" 2>/dev/null); output: $out"
+
+rm -f "$work/pipx.log"
+printf 'graphifyy 0.9.0\n' > "$work/pipx.list"
+out=$(PATH=$(install_path bin-pipx fakebin) "$cli" install graphify 2>&1)
+check "pipx present, pipx list shows graphifyy: pipx upgrade" \
+  "$(grep -qx 'upgrade graphifyy' "$work/pipx.log" 2>/dev/null; echo $?)" "got: $(cat "$work/pipx.log" 2>/dev/null); output: $out"
+rm -f "$work/pipx.list"
+
+rm -f "$work/pipx.log"
+printf 'otherpkg 1.0.0\n' > "$work/pipx.list"
+out=$(PATH=$(install_path bin-pipx fakebin) "$cli" install graphify 2>&1)
+check "pipx present, graphify on PATH but not pipx-managed (e.g. brew): pipx install, not upgrade" \
+  "$(grep -qx 'install graphifyy' "$work/pipx.log" 2>/dev/null; echo $?)" "got: $(cat "$work/pipx.log" 2>/dev/null); output: $out"
+rm -f "$work/pipx.list"
+
+rm -f "$work/pnpm.log"
+out=$(PATH=$(install_path bin-pnpm fakebin) "$cli" install codegraph 2>&1)
+check "pnpm present: add -g codegraph@latest" \
+  "$(grep -qx 'add -g @colbymchenry/codegraph@latest' "$work/pnpm.log" 2>/dev/null; echo $?)" "got: $(cat "$work/pnpm.log" 2>/dev/null); output: $out"
+
+rm -f "$work/npm.log"
+out=$(PATH=$(install_path bin-npm fakebin) "$cli" install codegraph 2>&1)
+check "pnpm absent, npm present: install -g codegraph@latest" \
+  "$(grep -qx 'install -g @colbymchenry/codegraph@latest' "$work/npm.log" 2>/dev/null; echo $?)" "got: $(cat "$work/npm.log" 2>/dev/null); output: $out"
+
+touch "$work/uv.fail"
+PATH=$(install_path bin-uv fakebin) "$cli" install graphify >/dev/null 2>&1
+rc=$?
+check "a failing installer makes repo-intel install exit nonzero" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc"
+rm -f "$work/uv.fail"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
