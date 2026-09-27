@@ -15,7 +15,7 @@ Usage: repo-intel <command> [options]
                              Choose the LLM backend for graphify semantic extraction.
                              B: a graphify provider (see `graphify provider list`),
                              ollama, openai, claude, gemini, deepseek, kimi,
-                             code-only (no LLM), or agent (Claude Code subagents)
+                             code-only (no LLM), or agent (current agent CLI subagents)
   config --show              Print the effective config
   build [--full]             Refresh codegraph and graphify using the configured backend
   migrate-hooks [--apply]    Remove the global `graphify hook-guard` and
@@ -172,7 +172,7 @@ cmd_build() {
   have graphify || die "graphify missing (run: repo-intel install)"
   case ${backend:-code-only} in
     agent)
-      info "backend=agent: code structure only here; run /graphify in Claude Code for docs"
+      info "backend=agent: code structure only here; run /graphify in your agent CLI for docs"
       (cd "$root" && graphify extract . --code-only ${args[@]+"${args[@]}"})
       return ;;
     code-only)
