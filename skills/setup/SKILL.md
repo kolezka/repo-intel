@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Use when the user asks to set up, install, enable or configure codegraph and graphify in a repository, to choose the LLM backend (LiteLLM, Ollama, OpenAI-compatible, Claude, Gemini) that builds the graphify graph, or to remove the old global graphify/codegraph hooks this plugin replaces.
+description: Use when the user asks to set up, install, enable or configure codegraph and graphify in a repository, to choose the LLM backend (LiteLLM, Ollama, OpenAI-compatible, Claude, Gemini, or the current agent CLI) that builds the graphify graph, or to remove the old global graphify/codegraph hooks this plugin replaces.
 ---
 
 # repo-intel setup
@@ -13,8 +13,9 @@ The CLI is `repo-intel` (on PATH while the plugin is enabled; otherwise
    `repo-intel install`. It uses uv or pipx for graphify and pnpm or npm for
    codegraph. Missing `jq`: tell the user, since the hooks stay silent without it.
 3. Backend unset: ask which backend builds the graph. Offer the providers from
-   `graphify provider list`, `ollama` for a local model, and `code-only` for no
-   LLM at all. Then run `repo-intel config --backend <name> [--model <model>] [--base-url <url>]`.
+   `graphify provider list`, `ollama` for a local model, `agent` to build with
+   the current agent CLI (its subagents run `/graphify`; `repo-intel build` then
+   indexes code only), and `code-only` for no LLM at all. Then run `repo-intel config --backend <name> [--model <model>] [--base-url <url>]`.
    Add `--global` for a machine-wide default. API keys stay in environment variables
    and never go in the config file.
 4. `repo-intel setup`. It indexes codegraph, adds `.codegraph/` and

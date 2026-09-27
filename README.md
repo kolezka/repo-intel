@@ -49,7 +49,7 @@ Skills: `/repo-intel:setup`, `/repo-intel:build`, `/repo-intel:route` (which too
 | `claude` | With `--base-url` it reaches an Anthropic-compatible gateway |
 | `gemini`, `deepseek`, `kimi` | graphify's built-in clients |
 | `code-only` | No LLM; code structure only. Also what `build` does when nothing is configured |
-| `agent` | Opt back into Claude Code subagents via `/graphify` |
+| `agent` | Build with the current agent CLI: its subagents run `/graphify`, `build` indexes code only |
 
 Config lives in `.repo-intel.json` at the repo root (commit it to share the choice) or in
 `~/.config/repo-intel/config.json` with `--global`. `REPO_INTEL_BACKEND` and
