@@ -18,7 +18,7 @@ Then, in the repository: `/repo-intel:setup`, or by hand:
 
 ```bash
 repo-intel doctor
-repo-intel install                       # only what is missing: graphify via uv/pipx, codegraph via pnpm/npm
+repo-intel install                       # install or upgrade to latest: graphify via uv/pipx, codegraph via pnpm/npm
 repo-intel config --backend litellm --model deepseek/deepseek-v4-flash
 repo-intel setup                         # index, .gitignore, graphify git hooks, first build
 repo-intel migrate-hooks                 # dry run: old global hooks this plugin replaces
