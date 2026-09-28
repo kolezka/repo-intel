@@ -8,6 +8,7 @@ hook="$here/hooks/repo-intel-hook.sh"
 cli="$here/bin/repo-intel"
 bump="$here/scripts/bump-version.sh"
 pass=0 fail=0
+orig_path=$PATH
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -15,15 +16,47 @@ export HOME="$work/home" XDG_CONFIG_HOME="$work/home/.config" CLAUDE_CONFIG_DIR=
 mkdir -p "$HOME" "$CLAUDE_CONFIG_DIR" "$TMPDIR" "$work/fakebin"
 unset REPO_INTEL_BACKEND REPO_INTEL_MODEL
 
-for tool in graphify codegraph; do
-  cat > "$work/fakebin/$tool" <<EOF
+cat > "$work/fakebin/codegraph" <<EOF
 #!/bin/sh
-printf '%s\n' "\$*" >> "$work/$tool.log"
+printf '%s\n' "\$*" >> "$work/codegraph.log"
 [ "\$1" = prompt-hook ] && printf '<codegraph_context>fake</codegraph_context>\n'
 exit 0
 EOF
-  chmod +x "$work/fakebin/$tool"
-done
+chmod +x "$work/fakebin/codegraph"
+
+# Fake graphify. `extract` is configurable per test via sentinel files under
+# $work (absent means the default: writes a valid empty graph, exits 0, no
+# warning), so build's exit-status contract can be exercised without the real
+# tool:
+#   graphify.exit       exit code `extract` returns (default 0)
+#   graphify.no-graph   present: `extract` does not write graphify-out/graph.json
+#   graphify.bad-json   present: `extract` writes invalid JSON to graph.json
+#   graphify.warn       present: its contents are printed to stderr as-is
+#                        (used to simulate graphify's partial-parse warning)
+cat > "$work/fakebin/graphify" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$work/graphify.log"
+if [ "\$1" = prompt-hook ]; then
+  printf '<codegraph_context>fake</codegraph_context>\n'
+  exit 0
+fi
+if [ "\$1" = extract ]; then
+  [ -f "$work/graphify.warn" ] && /bin/cat "$work/graphify.warn" >&2
+  if [ ! -f "$work/graphify.no-graph" ]; then
+    mkdir -p graphify-out
+    if [ -f "$work/graphify.bad-json" ]; then
+      printf '{not json' > graphify-out/graph.json
+    else
+      printf '{}\n' > graphify-out/graph.json
+    fi
+  fi
+  ec=0
+  [ -f "$work/graphify.exit" ] && ec=\$(/bin/cat "$work/graphify.exit")
+  exit "\$ec"
+fi
+exit 0
+EOF
+chmod +x "$work/fakebin/graphify"
 export PATH="$work/fakebin:$PATH"
 
 # Fake installers, one per own directory so a test can compose an install-time
@@ -399,6 +432,80 @@ pf=$(bv_plugin "1.2")
 check "non-semver version fails nonzero" "$([ "$?" != 0 ]; echo $?)" "exit 0"
 jq -e '.version == "1.2"' "$pf" >/dev/null 2>&1
 check "non-semver version leaves the file untouched" $? "got: $(cat "$pf")"
+
+# ---------------------------------------------------------------------------
+# build's exit-status contract (fix/build-exit-status). Kept as its own
+# section: graph.json presence/validity, the partial-parse count and --strict.
+# ---------------------------------------------------------------------------
+echo "build exit status"
+
+repo=$(new_repo build-ok)
+(cd "$repo" && "$cli" build >/dev/null 2>&1); rc=$?
+check "build exits 0 on a normal graphify run" "$([ "$rc" = 0 ]; echo $?)" "exit code was $rc"
+
+repo=$(new_repo build-fail)
+echo 1 > "$work/graphify.exit"
+(cd "$repo" && "$cli" build >/dev/null 2>&1); rc=$?
+check "graphify exiting nonzero makes build exit nonzero" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc"
+rm -f "$work/graphify.exit"
+
+repo=$(new_repo build-nograph)
+touch "$work/graphify.no-graph"
+(cd "$repo" && "$cli" build >/dev/null 2>&1); rc=$?
+check "graphify exits 0 but writes no graph.json: build exits nonzero" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc"
+rm -f "$work/graphify.no-graph"
+
+repo=$(new_repo build-badjson)
+touch "$work/graphify.bad-json"
+(cd "$repo" && "$cli" build >/dev/null 2>&1); rc=$?
+check "invalid graph.json makes build exit nonzero" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc"
+check "invalid graph.json: no build marker written" "$([ ! -e "$repo/graphify-out/.repo-intel-built" ]; echo $?)" "marker written despite invalid graph.json"
+rm -f "$work/graphify.bad-json"
+
+printf 'warning: 3 file(s) had syntax errors and may be partially extracted: A.svelte (first error at line 1, no symbols extracted), B.svelte (first error at line 1, no symbols extracted), C.svelte (first error at line 1, 1 symbol(s) extracted)\n' > "$work/graphify.warn"
+
+repo=$(new_repo build-warn)
+res=$(cd "$repo" && "$cli" build 2>&1); rc=$?
+check "a partial-parse warning still exits 0 by default" "$([ "$rc" = 0 ]; echo $?)" "exit code was $rc"
+echo "$res" | grep -q 'graphify: 3 file(s) could not be fully parsed'
+check "default build prints the partial-parse count" $? "got: $res"
+
+repo=$(new_repo build-warn-strict)
+(cd "$repo" && "$cli" build --strict >/dev/null 2>&1); rc=$?
+check "--strict fails the build on a partial-parse warning" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc"
+
+rm -f "$work/graphify.warn"
+
+repo=$(new_repo build-flags-a)
+(cd "$repo" && "$cli" build --strict --full >/dev/null 2>&1); rc=$?
+check "--strict --full is accepted" "$([ "$rc" = 0 ]; echo $?)" "exit code was $rc"
+
+repo=$(new_repo build-flags-b)
+(cd "$repo" && "$cli" build --full --strict >/dev/null 2>&1); rc=$?
+check "--full --strict is accepted" "$([ "$rc" = 0 ]; echo $?)" "exit code was $rc"
+
+repo=$(new_repo build-badflag)
+res=$(cd "$repo" && "$cli" build --bogus 2>&1); rc=$?
+check "an unknown build flag fails" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc"
+echo "$res" | grep -q 'Usage: repo-intel'
+check "an unknown build flag prints usage" $? "got: $res"
+
+echo "graphify contract (real binary)"
+real_graphify=$(PATH=$orig_path command -v graphify 2>/dev/null || true)
+if [ -z "$real_graphify" ]; then
+  echo "  skip  real graphify not on PATH; skipping stderr-wording contract test"
+else
+  sv=$(new_repo svelte-contract)
+  /bin/cat > "$sv/Bad.svelte" <<'SVELTE'
+<script>
+  let x = {
+</script>
+SVELTE
+  res=$(cd "$sv" && PATH=$orig_path "$real_graphify" extract . --code-only 2>&1 1>/dev/null)
+  # Mirrors partial_parse_pattern in bin/repo-intel; catches upstream wording drift.
+  echo "$res" | grep -Eq '[0-9]+ file\(s\) had syntax errors'
+  check "real graphify's stderr still matches the partial-parse count wording" $? "got: $res"
+fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

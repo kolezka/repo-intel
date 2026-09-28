@@ -15,3 +15,11 @@ asks for a full rebuild or the incremental build produced a broken graph.
 - `repo-intel config --show` prints the backend. A failed extract usually means
   the backend's API key variable is unset or the endpoint is down: report the
   error output as is and do not retry on another backend without asking.
+- **Always check `repo-intel build`'s exit status.** It fails (nonzero) if graphify
+  exits nonzero, or if it exits 0 but leaves no valid `graphify-out/graph.json`
+  behind. A nonzero exit means the graph is not usable; report the error, do not
+  treat the build as done.
+- graphify can also exit 0 while some files failed to parse. The build then prints
+  a count (`graphify: N file(s) could not be fully parsed`) and still exits 0. Use
+  `repo-intel build --strict` when a partial graph is not acceptable for the task
+  at hand: it turns that case into a nonzero exit instead.

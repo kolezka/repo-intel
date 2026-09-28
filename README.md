@@ -62,6 +62,10 @@ and `ollama`; a graphify provider keeps its URL in `~/.graphify/providers.json`.
 
 codegraph has no LLM step: it indexes with tree-sitter, so there is nothing to route.
 
+`repo-intel build` fails (nonzero) if graphify exits nonzero, or exits 0 but leaves no
+valid `graphify-out/graph.json`. It still exits 0 when some files failed to parse,
+printing a count; pass `--strict` to fail the build in that case instead.
+
 ## Replacing the old global hooks
 
 If `~/.claude/settings.json` already runs `graphify hook-guard` (PreToolUse on every Bash,
