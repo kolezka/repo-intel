@@ -17,7 +17,10 @@ Usage: repo-intel <command> [options]
                              ollama, openai, claude, gemini, deepseek, kimi,
                              code-only (no LLM), or agent (current agent CLI subagents)
   config --show              Print the effective config
-  build [--full]             Refresh codegraph and graphify using the configured backend
+  build [--full] [--strict]
+                             Refresh codegraph and graphify using the configured backend.
+                             --strict fails the build if graphify could not fully parse
+                             every file (see the partial-parse warning)
   migrate-hooks [--apply]    Remove the global `graphify hook-guard` and
                              `codegraph prompt-hook` entries this plugin replaces
                              (dry run unless --apply; backs up settings.json)
@@ -190,9 +193,34 @@ cmd_config() {
   info "wrote $target"
 }
 
+# Matches graphify's stderr warning about files it could only partly parse.
+# Depends on graphify's wording; tests/run.sh checks it against the real binary.
+partial_parse_pattern='[0-9]+ file\(s\) had syntax errors'
+
+# Streams graphify stderr live, keeps a copy to count partial parses into
+# GRAPHIFY_PARTIAL_COUNT. pipefail still carries a failing extract's exit code.
+run_graphify_extract() {
+  local root=$1 tmp line; shift
+  tmp=$(mktemp) || die "could not create a temp file for graphify's stderr"
+  trap 'rm -f "$tmp"' EXIT
+  { (cd "$root" && graphify extract . "$@") 2>&1 1>&3 | tee "$tmp" >&2; } 3>&1
+  GRAPHIFY_PARTIAL_COUNT=0
+  line=$(grep -oE "$partial_parse_pattern" "$tmp" 2>/dev/null | head -1) || true
+  [[ -n $line ]] && GRAPHIFY_PARTIAL_COUNT=${line%% *}
+  rm -f "$tmp"
+  trap - EXIT
+}
+
 cmd_build() {
-  local root backend model base_url args=()
-  [[ ${1:-} == --full ]] && args+=(--force)
+  local root backend model base_url args=() full=0 strict=0 code_only=0 opt
+  for opt in "$@"; do
+    case $opt in
+      --full) full=1 ;;
+      --strict) strict=1 ;;
+      *) printf 'repo-intel: build: unknown option: %s\n' "$opt" >&2; usage; exit 1 ;;
+    esac
+  done
+  [[ $full == 1 ]] && args+=(--force)
   root=$(repo_root)
   resolve_llm "$root"
   backend=$BACKEND model=$MODEL base_url=$BASE_URL
@@ -208,26 +236,40 @@ cmd_build() {
   case ${backend:-code-only} in
     agent)
       info "backend=agent: code structure only here; run /graphify in your agent CLI for docs"
-      (cd "$root" && graphify extract . --code-only ${args[@]+"${args[@]}"})
-      return ;;
+      args+=(--code-only); code_only=1 ;;
     code-only)
       [[ -z $backend ]] && info "no backend configured, indexing code only (set one: repo-intel config --backend <name>)"
-      (cd "$root" && graphify extract . --code-only ${args[@]+"${args[@]}"})
-      return ;;
-    ollama) args+=(--max-concurrency 1) ;;
+      args+=(--code-only); code_only=1 ;;
+    *)
+      [[ $backend == ollama ]] && args+=(--max-concurrency 1)
+      args+=(--backend "$backend")
+      [[ -n $model ]] && args+=(--model "$model")
+      # Point the stock clients at a self-hosted endpoint when one is configured.
+      if [[ -n $base_url ]]; then
+        case $backend in
+          openai) export OPENAI_BASE_URL=$base_url; [[ -n $model ]] && export OPENAI_MODEL=$model ;;
+          claude) export ANTHROPIC_BASE_URL=$base_url; [[ -n $model ]] && export ANTHROPIC_MODEL=$model ;;
+          ollama) export OLLAMA_HOST=$base_url ;;
+        esac
+      fi
+      info "graphify extract on backend=$backend${model:+ model=$model}" ;;
   esac
-  args+=(--backend "$backend")
-  [[ -n $model ]] && args+=(--model "$model")
-  # Point the stock clients at a self-hosted endpoint when one is configured.
-  if [[ -n $base_url ]]; then
-    case $backend in
-      openai) export OPENAI_BASE_URL=$base_url; [[ -n $model ]] && export OPENAI_MODEL=$model ;;
-      claude) export ANTHROPIC_BASE_URL=$base_url; [[ -n $model ]] && export ANTHROPIC_MODEL=$model ;;
-      ollama) export OLLAMA_HOST=$base_url ;;
-    esac
+
+  run_graphify_extract "$root" "${args[@]}"
+
+  # Applies to every backend path: graphify can exit 0 while leaving no usable
+  # graph (or a truncated one) behind it.
+  [[ -f $root/graphify-out/graph.json ]] || die "graphify extract did not produce $root/graphify-out/graph.json"
+  jq -e . "$root/graphify-out/graph.json" >/dev/null 2>&1 || die "$root/graphify-out/graph.json is not valid JSON"
+
+  if [[ $GRAPHIFY_PARTIAL_COUNT -gt 0 ]]; then
+    if [[ $strict == 1 ]]; then
+      die "graphify: $GRAPHIFY_PARTIAL_COUNT file(s) could not be fully parsed (see warning above); failing due to --strict"
+    fi
+    info "graphify: $GRAPHIFY_PARTIAL_COUNT file(s) could not be fully parsed (see warning above)"
   fi
-  info "graphify extract on backend=$backend${model:+ model=$model}"
-  (cd "$root" && graphify extract . "${args[@]}")
+
+  [[ $code_only == 1 ]] && return
   # The session-start hook compares docs changed since this commit.
   mkdir -p "$root/graphify-out"
   git -C "$root" rev-parse HEAD > "$root/graphify-out/.repo-intel-built" 2>/dev/null || true
