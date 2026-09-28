@@ -79,3 +79,15 @@ bash tests/run.sh
 
 The tests use fake `graphify` and `codegraph` binaries and a temporary `HOME`; they never
 touch your real settings or call an LLM.
+
+## Releasing
+
+Version bumps are manual, via GitHub Actions: open the **Actions** tab, pick the
+**Release** workflow, click **Run workflow**, and choose `patch`, `minor` or `major`.
+The workflow runs the tests, bumps `.claude-plugin/plugin.json`, commits, tags and
+pushes, then creates a GitHub release. It only runs on `main`.
+
+If `main` requires pull requests (branch protection), the workflow's push as
+`github-actions[bot]` will be rejected. Either add a bypass rule for that actor on
+the branch protection ruleset, or swap `GITHUB_TOKEN` for a PAT or GitHub App token
+with permission to push directly.
