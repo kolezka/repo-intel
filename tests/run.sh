@@ -6,6 +6,7 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 hook="$here/hooks/repo-intel-hook.sh"
 cli="$here/bin/repo-intel"
+bump="$here/scripts/bump-version.sh"
 pass=0 fail=0
 
 work=$(mktemp -d)
@@ -361,6 +362,43 @@ PATH=$(install_path bin-uv fakebin) "$cli" install graphify >/dev/null 2>&1
 rc=$?
 check "a failing installer makes repo-intel install exit nonzero" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc"
 rm -f "$work/uv.fail"
+echo "bump-version"
+
+bv_plugin() { # extra fields as JSON, defaults to {} -> writes $work/bump/plugin.json
+  mkdir -p "$work/bump"
+  jq -cn --arg v "$1" --argjson extra "${2:-{\}}" '{name: "repo-intel", version: $v} + $extra' > "$work/bump/plugin.json"
+  printf '%s' "$work/bump/plugin.json"
+}
+
+pf=$(bv_plugin "0.1.0" '{"description":"d","keywords":["a","b"]}')
+out=$("$bump" patch "$pf" 2>&1)
+check "patch bump prints the new version" "$([ "$out" = 0.1.1 ]; echo $?)" "got: $out"
+jq -e '.version == "0.1.1"' "$pf" >/dev/null 2>&1
+check "patch bump writes the new version" $? "got: $(cat "$pf")"
+jq -e '.description == "d" and .keywords == ["a","b"] and .name == "repo-intel"' "$pf" >/dev/null 2>&1
+check "patch bump leaves other fields untouched" $? "got: $(cat "$pf")"
+
+pf=$(bv_plugin "1.2.3")
+"$bump" minor "$pf" >/dev/null 2>&1
+jq -e '.version == "1.3.0"' "$pf" >/dev/null 2>&1
+check "minor bump resets patch to 0" $? "got: $(cat "$pf")"
+
+pf=$(bv_plugin "1.2.3")
+"$bump" major "$pf" >/dev/null 2>&1
+jq -e '.version == "2.0.0"' "$pf" >/dev/null 2>&1
+check "major bump resets minor and patch to 0" $? "got: $(cat "$pf")"
+
+pf=$(bv_plugin "1.0.0")
+"$bump" bogus "$pf" >/dev/null 2>&1
+check "invalid bump type fails nonzero" "$([ "$?" != 0 ]; echo $?)" "exit 0"
+jq -e '.version == "1.0.0"' "$pf" >/dev/null 2>&1
+check "invalid bump type leaves the file untouched" $? "got: $(cat "$pf")"
+
+pf=$(bv_plugin "1.2")
+"$bump" patch "$pf" >/dev/null 2>&1
+check "non-semver version fails nonzero" "$([ "$?" != 0 ]; echo $?)" "exit 0"
+jq -e '.version == "1.2"' "$pf" >/dev/null 2>&1
+check "non-semver version leaves the file untouched" $? "got: $(cat "$pf")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
