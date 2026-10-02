@@ -19,8 +19,11 @@ The CLI is `repo-intel` (on PATH while the plugin is enabled; otherwise
    Add `--global` for a machine-wide default. API keys stay in environment variables
    and never go in the config file.
 4. `repo-intel setup`. It indexes codegraph, adds `.codegraph/` and
-   `graphify-out/cache/` to `.gitignore`, installs graphify's git hooks, and runs
-   the first build.
+   `graphify-out/cache/` to `.gitignore`, installs graphify's git hooks, runs
+   the first build, then writes a short "Code graphs" block into `CLAUDE.md`
+   and `AGENTS.md` so an agent without this plugin still uses the graphs. The
+   user can remove that block later with `repo-intel instructions --remove`;
+   it never deletes either file.
 5. `doctor` reported duplicate global hooks: show `repo-intel migrate-hooks`
    (a dry run), ask, then run `repo-intel migrate-hooks --apply`. It backs up
    `settings.json` first and prints the undo command.

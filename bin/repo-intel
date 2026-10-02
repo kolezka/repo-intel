@@ -21,6 +21,10 @@ Usage: repo-intel <command> [options]
                              Refresh codegraph and graphify using the configured backend.
                              --strict fails the build if graphify could not fully parse
                              every file (see the partial-parse warning)
+  instructions [--remove]    Write (or remove) a short managed block in CLAUDE.md
+                             and AGENTS.md pointing any agent, with or without this
+                             plugin, at codegraph/graphify. Needs .codegraph/ and/or
+                             graphify-out/graph.json to already exist
   migrate-hooks [--apply]    Remove the global `graphify hook-guard` and
                              `codegraph prompt-hook` entries this plugin replaces
                              (dry run unless --apply; backs up settings.json)
@@ -71,11 +75,14 @@ cmd_doctor() {
   done
   root=$(git rev-parse --show-toplevel 2>/dev/null || true)
   if [[ -n $root ]]; then
+    local has_cg=0 has_gf=0
     printf '  %-15s %s\n' repo "$root"
-    if [[ -d $root/.codegraph ]]; then printf '  %-15s present\n' codegraph-index
+    if [[ -d $root/.codegraph ]]; then printf '  %-15s present\n' codegraph-index; has_cg=1
     else printf '  %-15s none (run: repo-intel setup)\n' codegraph-index; fi
-    if [[ -f $root/graphify-out/graph.json ]]; then printf '  %-15s present\n' graphify-graph
+    if [[ -f $root/graphify-out/graph.json ]]; then printf '  %-15s present\n' graphify-graph; has_gf=1
     else printf '  %-15s none (run: repo-intel build)\n' graphify-graph; fi
+    instructions_status "$root" "$has_cg" "$has_gf"
+    printf '  %-15s %s\n' instructions "$INSTR_STATUS"
   fi
   resolve_llm "$root"
   printf '  %-15s %s\n' backend "${BACKEND:-unset (build indexes code only)}${MODEL:+ / $MODEL}"
@@ -152,6 +159,7 @@ cmd_setup() {
   [[ -d $root/.codegraph ]] || (cd "$root" && codegraph init -y)
   (cd "$root" && graphify hook install)
   cmd_build
+  cmd_instructions
 }
 
 cmd_config() {
@@ -298,6 +306,395 @@ cmd_migrate_hooks() {
   info "removed; backup at $backup (undo: cp \"$backup\" \"$settings\")"
 }
 
+instr_begin='<!-- repo-intel:begin -->'
+instr_end='<!-- repo-intel:end -->'
+instr_cr=$'\r'
+
+# Short "how to use the graphs" note for CLAUDE.md/AGENTS.md, written for an
+# agent that does not have this plugin. Mirrors skills/route/SKILL.md. Returned
+# with no trailing newline; callers add one.
+instructions_block() { # has_codegraph(0/1) has_graphify(0/1)
+  local cg=$1 gf=$2
+  printf '%s\n' "$instr_begin"
+  printf '## Code graphs\n'
+  printf '\n'
+  printf 'This repo is indexed for faster lookup. Use the right tool for the question.\n'
+  if [[ $cg == 1 ]]; then
+    printf '\n'
+    printf 'Where is X defined, who calls it, what breaks if it changes: use codegraph.\n'
+    printf 'The `codegraph_explore` MCP tool if available, else `codegraph explore\n'
+    printf '"<symbols>"`, `codegraph impact X`, `codegraph affected <files>`.\n'
+  fi
+  if [[ $gf == 1 ]]; then
+    printf '\n'
+    printf 'Concepts, architecture, why something was decided: use graphify.\n'
+    printf '`graphify query "<question>"`, `graphify explain X`, `graphify path "A" "B"`.\n'
+  fi
+  printf '\n'
+  printf 'Literal text, config values, error strings, and every call site before calling\n'
+  printf 'a change safe or code unused: use rg (or grep), not the graphs. They miss\n'
+  printf 'dynamic dispatch, generated code and bodies wrapped in higher-order calls.\n'
+  printf '\n'
+  printf 'Refresh when stale: `repo-intel build` if installed, else `codegraph sync`\n'
+  printf 'and `graphify update .`.\n'
+  printf '%s\n' "$instr_end"
+}
+
+# Resolves $2 (CLAUDE.md or AGENTS.md under repo root $1, itself already
+# realpath'd) through any symlink. Sets INSTR_TARGET to the real path to
+# read/write (or the plain path if nothing exists yet there), and
+# INSTR_TARGET_ERR to a message if $2 is a dangling symlink, or a symlink
+# that resolves outside the repo. A dangling symlink is refused outright
+# rather than partly resolved: a relative target can itself cross a
+# symlinked directory, or an absolute target can embed "..", and a lexical
+# resolution good enough to catch every such case is exactly the complexity
+# realpath already handles correctly for anything that exists. Once a target
+# is known to exist, realpath follows the whole chain, including symlinked
+# ancestor directories, in one call.
+instructions_safe_target() {
+  local root=$1 path=$2 resolved
+  INSTR_TARGET_ERR=""
+  if [[ -L $path ]]; then
+    if [[ ! -e $path ]]; then
+      INSTR_TARGET_ERR="$path: dangling symlink"
+      INSTR_TARGET=$path
+      return 0
+    fi
+    resolved=$(realpath "$path")
+    case $resolved in
+      "$root"|"$root"/*) ;;
+      *) INSTR_TARGET_ERR="$path: symlink points outside the repo root ($resolved)" ;;
+    esac
+    INSTR_TARGET=$resolved
+    return 0
+  fi
+  if [[ -e $path ]]; then INSTR_TARGET=$(realpath "$path"); else INSTR_TARGET=$path; fi
+}
+
+# Resolves CLAUDE.md and AGENTS.md at the repo root through any symlink, so an
+# edit lands on the real file and a symlink stays a symlink. Sets INSTR_CLAUDE,
+# INSTR_AGENTS (real paths, or the plain path if the file does not exist yet),
+# INSTR_SHARED (1 if both names resolve to the same file), and
+# INSTR_CLAUDE_ERR/INSTR_AGENTS_ERR (a message if that name is a dangling
+# symlink or one escaping the repo; callers decide whether that is fatal).
+instructions_resolve() {
+  local root; root=$(realpath "$1")
+  instructions_safe_target "$root" "$root/CLAUDE.md"
+  INSTR_CLAUDE=$INSTR_TARGET; INSTR_CLAUDE_ERR=$INSTR_TARGET_ERR
+  instructions_safe_target "$root" "$root/AGENTS.md"
+  INSTR_AGENTS=$INSTR_TARGET; INSTR_AGENTS_ERR=$INSTR_TARGET_ERR
+  INSTR_SHARED=0; [[ $INSTR_CLAUDE == "$INSTR_AGENTS" ]] && INSTR_SHARED=1
+  return 0
+}
+
+# True if $1 exists and has more than one hard link, e.g. because it is
+# hardlinked to another file. `find -links` is a standard predicate on both
+# BSD and GNU find, so this works without GNU stat.
+instructions_hardlinked() {
+  [[ -f $1 ]] && [[ -n $(find "$1" -links +1 2>/dev/null) ]]
+}
+
+# Dies if $1 exists but is not a readable, writable, singly-linked regular
+# file. A missing path is fine, it gets created. Without the readable/
+# writable checks, an unreadable file (e.g. chmod 200) silently reads as
+# empty and gets overwritten. Without the hardlink check, replacing $1 (via
+# instructions_commit's atomic rename) would detach it from whatever else
+# shares its inode, silently un-sharing content the user may be relying on.
+instructions_check_target() {
+  local path=$1
+  [[ -e $path ]] || return 0
+  [[ -f $path ]] || die "$path: exists but is not a regular file"
+  [[ -r $path ]] || die "$path: exists but is not readable"
+  [[ -w $path ]] || die "$path: exists but is not writable"
+  instructions_hardlinked "$path" && die "$path: is hardlinked to another file; use a symlink instead"
+  return 0
+}
+
+# Single-pass locator for the managed block, shared by add/update/remove and
+# doctor. Scans $1 for the begin/end markers (matched after stripping
+# trailing spaces, tabs and \r) while ignoring anything inside a fenced code
+# block (``` or ~~~, opener indented up to 3 spaces, closer needs no trailing
+# text besides whitespace and at least as many fence characters as the
+# opener). Sets LOC_OK (1 if there is no block, or exactly one well-formed
+# one, outside any fence), LOC_BEGIN/LOC_END (line numbers, empty if there is
+# no block), LOC_CRLF (1 if the begin marker line ends in \r) and LOC_REASON
+# (set when LOC_OK is 0, naming the line numbers involved).
+instructions_locate() {
+  local file=$1 out
+  LOC_OK=1 LOC_BEGIN="" LOC_END="" LOC_CRLF=0 LOC_REASON=""
+  [[ -f $file ]] || return 0
+  out=$(awk -v begin="$instr_begin" -v end="$instr_end" -v cr="$instr_cr" '
+    function rstrip(s) {
+      sub(/[ \t]+$/, "", s)
+      sub(cr "+$", "", s)
+      sub(/[ \t]+$/, "", s)
+      return s
+    }
+    BEGIN { infence=0; fchar=""; flen=0; fopen=0; nb=0; ne=0; bl=""; el=""; firstb=0; firste=0; crlf=0 }
+    {
+      line = $0
+      if (match(line, /^ ? ? ?(```+|~~~+)/)) {
+        run = substr(line, RSTART, RLENGTH)
+        rest = substr(line, RSTART + RLENGTH)
+        gsub(/^ ? ? ?/, "", run)
+        ch = substr(run, 1, 1)
+        len = length(run)
+        if (!infence) { infence = 1; fchar = ch; flen = len; fopen = NR }
+        else if (ch == fchar && len >= flen && rstrip(rest) == "") { infence = 0 }
+        next
+      }
+      if (infence) next
+      s = rstrip(line)
+      if (s == begin) {
+        nb++
+        if (nb == 1) { firstb = NR; crlf = (substr(line, length(line), 1) == cr) ? 1 : 0 }
+        bl = (bl == "" ? NR : bl "," NR)
+      } else if (s == end) {
+        ne++
+        if (ne == 1) firste = NR
+        el = (el == "" ? NR : el "," NR)
+      }
+    }
+    END {
+      if (infence) {
+        print "ok|0"; print "begin|"; print "end|"; print "crlf|0"
+        print "reason|unterminated code fence (opened at line " fopen ")"
+        exit
+      }
+      if (nb == 0 && ne == 0) { print "ok|1"; print "begin|"; print "end|"; print "crlf|0"; print "reason|"; exit }
+      if (nb == 1 && ne == 1 && firstb < firste) { print "ok|1"; print "begin|" firstb; print "end|" firste; print "crlf|" crlf; print "reason|"; exit }
+      reason = ""
+      if (nb >= 2) reason = "more than one begin marker (lines " bl ")"
+      else if (ne >= 2) reason = "more than one end marker (lines " el ")"
+      else if (nb == 1 && ne == 1) reason = "end marker (line " firste ") before begin marker (line " firstb ")"
+      else if (nb == 1 && ne == 0) reason = "begin marker (line " firstb ") with no matching end marker"
+      else if (nb == 0 && ne == 1) reason = "end marker (line " firste ") with no matching begin marker"
+      print "ok|0"; print "begin|" firstb; print "end|" firste; print "crlf|0"; print "reason|" reason
+    }
+  ' "$file")
+  local key val
+  while IFS='|' read -r key val; do
+    case $key in
+      ok) LOC_OK=$val ;;
+      begin) LOC_BEGIN=$val ;;
+      end) LOC_END=$val ;;
+      crlf) LOC_CRLF=$val ;;
+      reason) LOC_REASON=$val ;;
+    esac
+  done <<< "$out"
+}
+
+# True if $1 (one line of text, no newline) is blank: empty, or only spaces,
+# tabs and/or \r (an LF or CRLF blank line).
+instructions_blank_line() {
+  local s=$1
+  while [[ $s == *[$' \t'"$instr_cr"] ]]; do s=${s%?}; done
+  [[ -z $s ]]
+}
+
+# Renders $1 (instructions_block()'s output, LF-separated, no trailing
+# newline) with CRLF line endings when $2 is 1. Sets INSTR_RENDERED and
+# INSTR_EOL (the line terminator to put after it).
+instructions_render() {
+  INSTR_RENDERED=$1; INSTR_EOL=$'\n'
+  if [[ $2 == 1 ]]; then
+    INSTR_RENDERED=${1//$'\n'/$'\r\n'}; INSTR_EOL=$'\r\n'
+  fi
+}
+
+# 0666 masked by the current umask: what a plain file creation would get.
+# mktemp always creates its file at 0600 regardless of umask, so a brand new
+# CLAUDE.md/AGENTS.md needs this instead of a mode that ignores umask.
+instructions_new_file_mode() {
+  local m; m=$(umask)
+  printf '%o' $(( 0666 & ~(0${m}) & 0777 ))
+}
+
+# Creates a temp file next to $1 (same directory, so instructions_commit's mv
+# stays on one filesystem and is atomic) and gives it $1's mode if $1 exists,
+# else umask-masked 0666. Sets INSTR_TMP, truncated and ready for the caller
+# to append to, and arms a cleanup trap so a die before the matching
+# instructions_commit never leaves a stray temp file behind. Seeding the mode
+# is not best-effort: a silently-ignored failure here would leave the temp
+# file at mktemp's 0600 and, once committed, silently tighten $1's mode.
+instructions_new_tmp() {
+  local real=$1 dir
+  dir=$(dirname "$real")
+  INSTR_TMP=$(mktemp "$dir/.repo-intel-instructions.XXXXXX") || die "$real: could not create a temp file in $dir"
+  trap 'rm -f "$INSTR_TMP"' EXIT
+  if [[ -f $real ]]; then
+    cp -p "$real" "$INSTR_TMP" || die "$real: could not copy its mode to the temp file"
+  else
+    chmod "$(instructions_new_file_mode)" "$INSTR_TMP" || die "could not set the new file's mode"
+  fi
+  : > "$INSTR_TMP"
+}
+
+# Atomically replaces $1 with the content built in INSTR_TMP (see
+# instructions_new_tmp): mv is a rename on one filesystem, so $1 is either
+# the old content or the new content, never half of either, even if an
+# earlier write in this process failed or the disk filled up building it.
+instructions_commit() {
+  mv -f "$INSTR_TMP" "$1" || die "$1: could not replace the file"
+  trap - EXIT
+}
+
+# Adds, updates or removes the repo-intel managed block in $file, keeping
+# every other byte of the file untouched. Never reads the file's content into
+# a shell variable: command substitution truncates at the first NUL byte, so
+# all copying goes file-to-file via sed/cat, and "unchanged" is decided by
+# cmp against the candidate output, not by comparing strings. $block is the
+# new block text (instructions_block()'s output, no trailing newline), or
+# empty to remove the block. Sets ISTATUS to
+# added/updated/unchanged/removed/"no graph found". Callers are expected to
+# have already validated the file (instructions_check_target) and its
+# structure (instructions_locate, LOC_OK) before calling this; it repeats
+# both checks so it is still safe to call on its own.
+instructions_apply() {
+  local file=$1 block=$2 reason=$3
+
+  instructions_check_target "$file"
+  instructions_locate "$file"
+  [[ $LOC_OK == 1 ]] || die "$file: $LOC_REASON"
+  local ln_begin=$LOC_BEGIN ln_end=$LOC_END crlf=$LOC_CRLF
+
+  if [[ -z $block ]]; then
+    if [[ -z $ln_begin ]]; then
+      ISTATUS="unchanged"; [[ $reason == nograph ]] && ISTATUS="no graph found"
+      return 0
+    fi
+    # Drop the one blank line add would have inserted as a separator: add
+    # always writes exactly one, so it is safe to drop unconditionally here.
+    local pre_count=$((ln_begin - 1))
+    if [[ $pre_count -gt 0 ]] && instructions_blank_line "$(sed -n "${pre_count}p" "$file")"; then
+      pre_count=$((pre_count - 1))
+    fi
+    instructions_new_tmp "$file"
+    [[ $pre_count -gt 0 ]] && sed -n "1,${pre_count}p" "$file" >> "$INSTR_TMP"
+    sed -n "$((ln_end + 1)),\$p" "$file" >> "$INSTR_TMP"
+    instructions_commit "$file"
+    ISTATUS="removed"
+    return 0
+  fi
+
+  if [[ -z $ln_begin ]]; then
+    local eol_count=0
+    if [[ -s $file ]]; then
+      [[ $(sed -n '1p' "$file" | tail -c1) == "$instr_cr" ]] && eol_count=1
+    fi
+    instructions_render "$block" "$eol_count"
+    instructions_new_tmp "$file"
+    if [[ -s $file ]]; then
+      cat "$file" >> "$INSTR_TMP"
+      # Terminate an unterminated last line, then always add exactly one
+      # blank-line separator (even if the file already ends in one): add and
+      # remove must be exact inverses, and a conditional separator cannot be
+      # told apart from a pre-existing blank line once it is written.
+      [[ "$(tail -c1 "$file" | wc -l | tr -d ' ')" == 1 ]] || printf '%s' "$INSTR_EOL" >> "$INSTR_TMP"
+      printf '%s' "$INSTR_EOL" >> "$INSTR_TMP"
+    fi
+    printf '%s%s' "$INSTR_RENDERED" "$INSTR_EOL" >> "$INSTR_TMP"
+    instructions_commit "$file"
+    ISTATUS="added"
+    return 0
+  fi
+
+  instructions_render "$block" "$crlf"
+  instructions_new_tmp "$file"
+  [[ $((ln_begin - 1)) -gt 0 ]] && sed -n "1,$((ln_begin - 1))p" "$file" >> "$INSTR_TMP"
+  printf '%s%s' "$INSTR_RENDERED" "$INSTR_EOL" >> "$INSTR_TMP"
+  sed -n "$((ln_end + 1)),\$p" "$file" >> "$INSTR_TMP"
+  if cmp -s "$INSTR_TMP" "$file"; then
+    ISTATUS="unchanged"; rm -f "$INSTR_TMP"; trap - EXIT; return 0
+  fi
+  instructions_commit "$file"
+  ISTATUS="updated"
+}
+
+# Computes the doctor-facing status of the managed block for $2/$3
+# (has_codegraph/has_graphify) at repo root $1: present, missing, n/a (no
+# graph yet) or invalid (<reason>). Never dies; a bad symlink or a malformed
+# block is reported, not fatal, since doctor only reads. Sets INSTR_STATUS.
+instructions_status() {
+  local root=$1 has_cg=$2 has_gf=$3
+  instructions_resolve "$root"
+  if [[ -n $INSTR_CLAUDE_ERR ]]; then
+    INSTR_STATUS="invalid (${INSTR_CLAUDE_ERR#*: })"; return
+  fi
+  if [[ $INSTR_SHARED == 0 && -n $INSTR_AGENTS_ERR ]]; then
+    INSTR_STATUS="invalid (${INSTR_AGENTS_ERR#*: })"; return
+  fi
+  if instructions_hardlinked "$INSTR_CLAUDE"; then
+    INSTR_STATUS="invalid (hardlinked file)"; return
+  fi
+  if [[ $INSTR_SHARED == 0 ]] && instructions_hardlinked "$INSTR_AGENTS"; then
+    INSTR_STATUS="invalid (hardlinked file)"; return
+  fi
+
+  instructions_locate "$INSTR_CLAUDE"
+  local c_ok=$LOC_OK c_begin=$LOC_BEGIN c_reason=$LOC_REASON a_ok=1 a_begin="" a_reason=""
+  if [[ $INSTR_SHARED == 1 ]]; then
+    a_ok=$c_ok; a_begin=$c_begin
+  else
+    instructions_locate "$INSTR_AGENTS"
+    a_ok=$LOC_OK; a_begin=$LOC_BEGIN; a_reason=$LOC_REASON
+  fi
+
+  if [[ $c_ok == 0 ]]; then INSTR_STATUS="invalid ($c_reason)"
+  elif [[ $a_ok == 0 ]]; then INSTR_STATUS="invalid ($a_reason)"
+  elif [[ -n $c_begin ]] && { [[ $INSTR_SHARED == 1 ]] || [[ -n $a_begin ]]; }; then INSTR_STATUS="present"
+  elif [[ $has_cg == 0 && $has_gf == 0 ]]; then INSTR_STATUS="n/a (no graph yet)"
+  else INSTR_STATUS="missing (run: repo-intel instructions)"
+  fi
+}
+
+cmd_instructions() {
+  local remove=0 root has_cg=0 has_gf=0 block="" reason=normal arg
+  for arg in "$@"; do
+    case $arg in
+      --remove) remove=1 ;;
+      *) die "instructions: unknown option: $arg" ;;
+    esac
+  done
+  root=$(repo_root)
+  [[ -d $root/.codegraph ]] && has_cg=1
+  [[ -f $root/graphify-out/graph.json ]] && has_gf=1
+
+  if [[ $remove == 0 ]]; then
+    if [[ $has_cg == 1 || $has_gf == 1 ]]; then
+      block=$(instructions_block "$has_cg" "$has_gf")
+    else
+      reason=nograph
+    fi
+  fi
+
+  # Validate both targets (symlink safety, file type/permissions, existing
+  # block structure) before writing either one: on any doubt, die here, not
+  # partway through.
+  instructions_resolve "$root"
+  [[ -z $INSTR_CLAUDE_ERR ]] || die "$INSTR_CLAUDE_ERR"
+  [[ $INSTR_SHARED == 1 || -z $INSTR_AGENTS_ERR ]] || die "$INSTR_AGENTS_ERR"
+
+  instructions_check_target "$INSTR_CLAUDE"
+  instructions_locate "$INSTR_CLAUDE"
+  [[ $LOC_OK == 1 ]] || die "$INSTR_CLAUDE: $LOC_REASON"
+  if [[ $INSTR_SHARED == 0 ]]; then
+    instructions_check_target "$INSTR_AGENTS"
+    instructions_locate "$INSTR_AGENTS"
+    [[ $LOC_OK == 1 ]] || die "$INSTR_AGENTS: $LOC_REASON"
+  fi
+
+  if [[ $INSTR_SHARED == 1 ]]; then
+    instructions_apply "$INSTR_CLAUDE" "$block" "$reason"
+    info "CLAUDE.md, AGENTS.md (same file): $ISTATUS"
+  else
+    instructions_apply "$INSTR_CLAUDE" "$block" "$reason"
+    info "CLAUDE.md: $ISTATUS"
+    instructions_apply "$INSTR_AGENTS" "$block" "$reason"
+    info "AGENTS.md: $ISTATUS"
+  fi
+}
+
 case ${1:-help} in
   help|-h|--help) usage; exit 0 ;;
   install) ;;
@@ -310,6 +707,7 @@ case $cmd in
   setup) cmd_setup "$@" ;;
   config) cmd_config "$@" ;;
   build) cmd_build "$@" ;;
+  instructions) cmd_instructions "$@" ;;
   migrate-hooks) cmd_migrate_hooks "$@" ;;
   *) usage; exit 1 ;;
 esac
