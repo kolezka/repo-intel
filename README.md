@@ -21,6 +21,7 @@ repo-intel doctor
 repo-intel install                       # install or upgrade to latest: graphify via uv/pipx, codegraph via pnpm/npm
 repo-intel config --backend litellm --model deepseek/deepseek-v4-flash
 repo-intel setup                         # index, .gitignore, graphify git hooks, first build
+repo-intel instructions                  # CLAUDE.md/AGENTS.md note so agents without this plugin use the graphs too
 repo-intel migrate-hooks                 # dry run: old global hooks this plugin replaces
 ```
 
@@ -34,6 +35,26 @@ Requirements: `git`, `jq`, and `uv`/`pipx` plus `pnpm`/`npm` for the installs.
 | UserPromptSubmit | Runs `codegraph prompt-hook` only for prompts that look structural ("who calls", "what breaks", a camelCase or snake_case symbol, a file path; English and Polish). Other prompts never start node. | same |
 | PreToolUse Bash, Grep, Glob | The first search in a session gets a one-line pointer to the graphs. Never repeated, never blocks. | same |
 | PreToolUse Skill, Agent, Task | With a backend configured, denies `/graphify` builds and graphify extraction subagents (also in a repo with no graph yet) and points to `repo-intel build`. `/graphify query`, `path` and `explain` stay allowed. `repo-intel config --backend agent` turns the guard off. | same |
+
+`repo-intel instructions` writes a short "Code graphs" block into `CLAUDE.md`
+and `AGENTS.md` at the repo root, so an agent without this plugin (Codex, Cursor,
+a teammate's Claude Code) still knows to use codegraph and graphify instead of
+grepping blind. The block sits between `<!-- repo-intel:begin -->` and
+`<!-- repo-intel:end -->` markers; everything else in both files is left alone,
+and running it again only rewrites the block if it changed. If the two files are
+symlinked to each other, it edits the shared file once and keeps the symlink.
+`repo-intel setup` runs this step automatically after the first build.
+`repo-intel instructions --remove` deletes the block (never the file).
+
+Add puts exactly one blank line before the block and `--remove` takes exactly one
+out, so the two undo each other. Two cases do not round-trip: a file with no final
+newline gets one, and a hand-written blank line right before a hand-written block
+is removed with it.
+
+`instructions` writes nothing and exits nonzero on a file it cannot edit safely:
+unreadable or unwritable, hardlinked, a dangling symlink, a symlink leaving the
+repo, an unterminated code fence, or missing or duplicate markers. Markers inside
+code fences are ignored. Writes are atomic and keep the file's mode.
 
 Skills: `/repo-intel:setup`, `/repo-intel:build`, `/repo-intel:route` (which tool answers which question).
 

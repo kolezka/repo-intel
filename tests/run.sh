@@ -490,6 +490,454 @@ check "an unknown build flag fails" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was
 echo "$res" | grep -q 'Usage: repo-intel'
 check "an unknown build flag prints usage" $? "got: $res"
 
+echo "instructions"
+
+r=$(new_repo instr-cg); mkdir -p "$r/.codegraph"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "info line reports CLAUDE.md added" "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: added'; echo $?)" "got: $out"
+check "info line reports AGENTS.md added" "$(echo "$out" | grep -qx 'repo-intel: AGENTS.md: added'; echo $?)" "got: $out"
+grep -qF '<!-- repo-intel:begin -->' "$r/CLAUDE.md" && grep -qF '<!-- repo-intel:end -->' "$r/CLAUDE.md"
+check "codegraph-only: CLAUDE.md gets the managed block" $? "got: $(cat "$r/CLAUDE.md" 2>/dev/null)"
+grep -qF '<!-- repo-intel:begin -->' "$r/AGENTS.md"
+check "codegraph-only: AGENTS.md gets the managed block too" $? "got: $(cat "$r/AGENTS.md" 2>/dev/null)"
+grep -q 'codegraph_explore' "$r/CLAUDE.md"
+check "codegraph-only: codegraph section is present" $? "got: $(cat "$r/CLAUDE.md")"
+grep -q 'graphify query' "$r/CLAUDE.md"
+check "codegraph-only: graphify section is absent" "$([ $? != 0 ]; echo $?)" "graphify section should not be there"
+
+r=$(new_repo instr-both); mkdir -p "$r/.codegraph" "$r/graphify-out"; echo '{}' > "$r/graphify-out/graph.json"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+grep -q 'codegraph_explore' "$r/CLAUDE.md"
+check "both graphs: codegraph section is present" $? "got: $(cat "$r/CLAUDE.md")"
+grep -q 'graphify query' "$r/CLAUDE.md"
+check "both graphs: graphify section is present" $? "got: $(cat "$r/CLAUDE.md")"
+
+cp "$r/CLAUDE.md" "$work/instr-both-claude-before"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "rerun with no change in graph presence reports unchanged" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: unchanged' && echo "$out" | grep -qx 'repo-intel: AGENTS.md: unchanged'; echo $?)" "got: $out"
+cmp -s "$r/CLAUDE.md" "$work/instr-both-claude-before"
+check "rerun with no change leaves file content identical" $? "content changed"
+
+r=$(new_repo instr-update); mkdir -p "$r/.codegraph"
+printf 'BEFORE line\n' > "$r/CLAUDE.md"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+printf '%s\nAFTER line\n' "$(cat "$r/CLAUDE.md")" > "$r/CLAUDE.md"
+mkdir -p "$r/graphify-out"; echo '{}' > "$r/graphify-out/graph.json"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "adding a second graph updates the block" "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: updated'; echo $?)" "got: $out"
+grep -qxF 'BEFORE line' "$r/CLAUDE.md"
+check "update preserves content before the block" $? "got: $(cat "$r/CLAUDE.md")"
+grep -qxF 'AFTER line' "$r/CLAUDE.md"
+check "update preserves content after the block" $? "got: $(cat "$r/CLAUDE.md")"
+grep -q 'graphify query' "$r/CLAUDE.md"
+check "update adds the newly available graphify section" $? "got: $(cat "$r/CLAUDE.md")"
+
+r=$(new_repo instr-nograph)
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "no graph: nothing created, info says no graph found" \
+  "$([ ! -e "$r/CLAUDE.md" ] && [ ! -e "$r/AGENTS.md" ] && echo "$out" | grep -qx 'repo-intel: CLAUDE.md: no graph found'; echo $?)" "got: $out; CLAUDE.md exists: $([ -e "$r/CLAUDE.md" ] && echo yes || echo no)"
+
+r=$(new_repo instr-symlink); mkdir -p "$r/.codegraph"
+printf 'shared notes\n' > "$r/AGENTS.md"
+ln -s AGENTS.md "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "symlinked CLAUDE.md -> AGENTS.md: one shared info line" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md, AGENTS.md (same file): added'; echo $?)" "got: $out"
+check "symlinked CLAUDE.md -> AGENTS.md: CLAUDE.md stays a symlink" "$([ -L "$r/CLAUDE.md" ]; echo $?)" "symlink replaced by a regular file"
+grep -qF 'shared notes' "$r/AGENTS.md" && grep -qF '<!-- repo-intel:begin -->' "$r/AGENTS.md"
+check "symlinked CLAUDE.md -> AGENTS.md: the shared file has both the old content and the block" $? "got: $(cat "$r/AGENTS.md")"
+
+r=$(new_repo instr-remove); mkdir -p "$r/.codegraph"
+printf 'My own CLAUDE.md notes.\n\nSecond paragraph.\n' > "$r/CLAUDE.md"
+cp "$r/CLAUDE.md" "$work/instr-remove-orig"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+out=$(cd "$r" && "$cli" instructions --remove 2>&1)
+check "--remove reports removed" "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: removed'; echo $?)" "got: $out"
+cmp -s "$r/CLAUDE.md" "$work/instr-remove-orig"
+check "--remove restores the original content exactly" $? "got: $(cat "$r/CLAUDE.md")"
+check "--remove never deletes AGENTS.md itself" "$([ -e "$r/AGENTS.md" ]; echo $?)" "AGENTS.md is gone"
+
+r=$(new_repo instr-remove-untouched)
+printf 'nothing to remove here\n' > "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions --remove 2>&1)
+check "--remove on a file with no block leaves it untouched" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: unchanged' && grep -qxF 'nothing to remove here' "$r/CLAUDE.md"; echo $?)" "got: $out"
+
+r=$(new_repo instr-setup)
+out=$(cd "$r" && "$cli" setup 2>&1); rc=$?
+check "setup runs install, build and instructions in order without failing" "$([ "$rc" = 0 ]; echo $?)" "exit code was $rc; output: $out"
+grep -qF '<!-- repo-intel:begin -->' "$r/CLAUDE.md" 2>/dev/null
+check "setup writes the managed block into CLAUDE.md" $? "got: $(cat "$r/CLAUDE.md" 2>/dev/null)"
+grep -qF '<!-- repo-intel:begin -->' "$r/AGENTS.md" 2>/dev/null
+check "setup writes the managed block into AGENTS.md" $? "got: $(cat "$r/AGENTS.md" 2>/dev/null)"
+
+rsetup=$(new_repo instr-doctor)
+out=$(cd "$rsetup" && "$cli" doctor 2>&1)
+echo "$out" | grep -qE '^  instructions +n/a \(no graph yet\)$'
+check "doctor reports instructions n/a when there is no graph at all" $? "got: $out"
+mkdir -p "$rsetup/.codegraph"
+out=$(cd "$rsetup" && "$cli" doctor 2>&1)
+echo "$out" | grep -qE '^  instructions +missing \(run: repo-intel instructions\)$'
+check "doctor reports instructions missing once a graph exists but the block does not" $? "got: $out"
+(cd "$rsetup" && "$cli" instructions >/dev/null 2>&1)
+out=$(cd "$rsetup" && "$cli" doctor 2>&1)
+echo "$out" | grep -qE '^  instructions +present$'
+check "doctor reports instructions present after they are written" $? "got: $out"
+check "doctor's exit status is unaffected by the instructions line" "$(cd "$rsetup" && "$cli" doctor >/dev/null 2>&1; echo $?)" ""
+
+echo "instructions: CRLF files"
+
+r=$(new_repo instr-crlf); mkdir -p "$r/.codegraph"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+awk '{printf "%s\r\n", $0}' "$r/CLAUDE.md" > "$r/CLAUDE.md.crlf" && mv "$r/CLAUDE.md.crlf" "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "a CRLF-converted file: rerun recognises the existing block instead of duplicating it" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: unchanged'; echo $?)" "got: $out"
+begins=$(grep -cF '<!-- repo-intel:begin -->' "$r/CLAUDE.md")
+check "a CRLF-converted file: still has exactly one begin marker" "$([ "$begins" = 1 ]; echo $?)" "got $begins begin markers"
+
+r=$(new_repo instr-crlf-update); mkdir -p "$r/.codegraph"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+awk '{printf "%s\r\n", $0}' "$r/CLAUDE.md" > "$r/CLAUDE.md.crlf" && mv "$r/CLAUDE.md.crlf" "$r/CLAUDE.md"
+mkdir -p "$r/graphify-out"; echo '{}' > "$r/graphify-out/graph.json"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "a CRLF-converted file: adding a second graph updates, not duplicates, the block" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: updated'; echo $?)" "got: $out"
+begins=$(grep -cF '<!-- repo-intel:begin -->' "$r/CLAUDE.md")
+check "a CRLF-converted file: update still leaves exactly one begin marker" "$([ "$begins" = 1 ]; echo $?)" "got $begins begin markers"
+line=$(grep -F 'Refresh when stale' "$r/CLAUDE.md")
+check "a CRLF-converted file: the rewritten block keeps CRLF line endings" "$([[ $line == *$'\r' ]]; echo $?)" "got line without trailing CR: $(printf '%s' "$line" | od -c | head -3)"
+
+echo "instructions: --remove symmetry"
+
+r=$(new_repo instr-sep-blank); mkdir -p "$r/.codegraph"
+printf 'a\n\n' > "$r/CLAUDE.md"
+cp "$r/CLAUDE.md" "$work/instr-sep-blank.orig"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+(cd "$r" && "$cli" instructions --remove >/dev/null 2>&1)
+cmp -s "$r/CLAUDE.md" "$work/instr-sep-blank.orig"
+check "remove exactly restores a file that already ended in a blank line (a\\n\\n)" $? \
+  "got: $(cat -A "$r/CLAUDE.md" 2>/dev/null); want: $(cat -A "$work/instr-sep-blank.orig" 2>/dev/null)"
+
+r=$(new_repo instr-sep-single); mkdir -p "$r/.codegraph"
+printf 'a\n' > "$r/CLAUDE.md"
+cp "$r/CLAUDE.md" "$work/instr-sep-single.orig"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+(cd "$r" && "$cli" instructions --remove >/dev/null 2>&1)
+cmp -s "$r/CLAUDE.md" "$work/instr-sep-single.orig"
+check "remove exactly restores a file with a single trailing newline (a\\n)" $? \
+  "got: $(cat -A "$r/CLAUDE.md" 2>/dev/null); want: $(cat -A "$work/instr-sep-single.orig" 2>/dev/null)"
+
+r=$(new_repo instr-sep-none); mkdir -p "$r/.codegraph"
+printf 'a' > "$r/CLAUDE.md"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+(cd "$r" && "$cli" instructions --remove >/dev/null 2>&1)
+printf 'a\n' > "$work/instr-sep-none.want"
+cmp -s "$r/CLAUDE.md" "$work/instr-sep-none.want"
+check "remove on a file with no trailing newline restores it with one newline added (documented, accepted loss)" $? \
+  "got: $(cat -A "$r/CLAUDE.md" 2>/dev/null)"
+
+echo "instructions: validate before writing"
+
+r=$(new_repo instr-unreadable); mkdir -p "$r/.codegraph"
+printf 'keep me\n' > "$r/CLAUDE.md"
+chmod 200 "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1); rc=$?
+chmod 644 "$r/CLAUDE.md" 2>/dev/null
+check "unreadable CLAUDE.md: instructions dies instead of overwriting it" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+grep -qxF 'keep me' "$r/CLAUDE.md"
+check "unreadable CLAUDE.md: original content is not lost" $? "got: $(cat "$r/CLAUDE.md" 2>/dev/null)"
+check "unreadable CLAUDE.md: AGENTS.md is not written either (both validated before either is written)" \
+  "$([ ! -e "$r/AGENTS.md" ]; echo $?)" "AGENTS.md exists: $(cat "$r/AGENTS.md" 2>/dev/null)"
+
+r=$(new_repo instr-fenced); mkdir -p "$r/.codegraph"
+cat > "$r/CLAUDE.md" <<'MARKDOWN'
+# Notes
+
+Example of the managed block:
+
+```
+<!-- repo-intel:begin -->
+fake example, do not touch
+<!-- repo-intel:end -->
+```
+
+End of notes.
+MARKDOWN
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "a fenced example block: instructions adds a real block, not fooled by the fenced one" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: added'; echo $?)" "got: $out"
+begins=$(grep -cF '<!-- repo-intel:begin -->' "$r/CLAUDE.md")
+check "a fenced example block: now has two begin markers total (the example, and the real one)" \
+  "$([ "$begins" = 2 ]; echo $?)" "got $begins"
+grep -qxF 'fake example, do not touch' "$r/CLAUDE.md"
+check "a fenced example block: the example inside the fence is preserved untouched" $? "got: $(cat "$r/CLAUDE.md")"
+
+r=$(new_repo instr-nul); mkdir -p "$r/.codegraph"
+printf 'before\x00after\n' > "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "a file with an embedded NUL byte: instructions still adds the block" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: added'; echo $?)" "got: $out"
+head -n1 "$r/CLAUDE.md" > "$work/instr-nul-got.bin"
+printf 'before\x00after\n' > "$work/instr-nul-want.bin"
+cmp -s "$work/instr-nul-got.bin" "$work/instr-nul-want.bin"
+check "a file with an embedded NUL byte: the NUL-containing line survives byte for byte" $? \
+  "got: $(od -c "$work/instr-nul-got.bin" 2>/dev/null | head -2)"
+
+r=$(new_repo instr-symlink-outside); mkdir -p "$r/.codegraph"
+printf 'outside content\n' > "$work/instr-outside-target.md"
+ln -s "$work/instr-outside-target.md" "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1); rc=$?
+check "CLAUDE.md symlinked outside the repo: instructions dies instead of writing through it" \
+  "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+grep -qxF 'outside content' "$work/instr-outside-target.md"
+check "CLAUDE.md symlinked outside the repo: the external target is untouched" $? \
+  "got: $(cat "$work/instr-outside-target.md" 2>/dev/null)"
+
+r=$(new_repo instr-symlink-dangling-outside); mkdir -p "$r/.codegraph"
+ln -s ../outside-dangling.md "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1); rc=$?
+check "CLAUDE.md as a dangling symlink pointing outside the repo: instructions dies" \
+  "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+check "CLAUDE.md as a dangling symlink pointing outside the repo: nothing gets created at the target" \
+  "$([ ! -e "$work/repos/outside-dangling.md" ]; echo $?)" "target was created"
+
+r=$(new_repo instr-dup-begin); mkdir -p "$r/.codegraph"
+printf '<!-- repo-intel:begin -->\nA\n<!-- repo-intel:end -->\n<!-- repo-intel:begin -->\nB\n<!-- repo-intel:end -->\n' > "$r/CLAUDE.md"
+cp "$r/CLAUDE.md" "$work/instr-dup-begin.orig"
+out=$(cd "$r" && "$cli" instructions 2>&1); rc=$?
+check "two begin/end pairs outside any fence: instructions dies naming the file" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+echo "$out" | grep -q 'CLAUDE.md'
+check "the die message names the file" $? "got: $out"
+cmp -s "$r/CLAUDE.md" "$work/instr-dup-begin.orig"
+check "two begin/end pairs: the file is left untouched" $? "got: $(cat "$r/CLAUDE.md")"
+
+r=$(new_repo instr-trailing-ws); mkdir -p "$r/.codegraph"
+printf '<!-- repo-intel:begin -->   \n## x\n<!-- repo-intel:end -->\t\n' > "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "a marker with trailing spaces/tabs: still recognised, file updated in place not duplicated" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: updated'; echo $?)" "got: $out"
+begins=$(grep -cF '<!-- repo-intel:begin -->' "$r/CLAUDE.md")
+check "a marker with trailing spaces/tabs: exactly one begin marker after the update" "$([ "$begins" = 1 ]; echo $?)" "got $begins"
+
+r=$(new_repo instr-doctor-invalid); mkdir -p "$r/.codegraph"
+printf '<!-- repo-intel:begin -->\nA\n<!-- repo-intel:end -->\n<!-- repo-intel:begin -->\nB\n<!-- repo-intel:end -->\n' > "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" doctor 2>&1); rc=$?
+echo "$out" | grep -qE '^  instructions +invalid \('
+check "doctor reports invalid for a malformed block instead of present" $? "got: $out"
+check "doctor's exit status is unaffected by a malformed block" "$([ "$rc" = 0 ]; echo $?)" "exit code was $rc"
+
+r=$(new_repo instr-remove-bogus); mkdir -p "$r/.codegraph"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+out=$(cd "$r" && "$cli" instructions --remove --bogus 2>&1); rc=$?
+check "instructions --remove --bogus dies on the unknown option" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+grep -qF '<!-- repo-intel:begin -->' "$r/CLAUDE.md"
+check "instructions --remove --bogus: the block is not removed" $? "got: $(cat "$r/CLAUDE.md" 2>/dev/null)"
+
+echo "instructions: symlink escape (round 2)"
+
+r=$(new_repo instr-escape-absdotdot); mkdir -p "$r/.codegraph"
+ln -s "$(realpath "$r")/../instr-escape-absdotdot-outside.md" "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1); rc=$?
+check "an absolute dangling symlink target containing .. is refused" "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+check "an absolute dangling symlink target containing ..: nothing gets created at it" \
+  "$([ ! -e "$work/repos/instr-escape-absdotdot-outside.md" ]; echo $?)" "target was created"
+
+r=$(new_repo instr-escape-chain); mkdir -p "$r/.codegraph"
+ln -s middle.md "$r/CLAUDE.md"
+ln -s "$work/instr-escape-chain-missing-external.md" "$r/middle.md"
+out=$(cd "$r" && "$cli" instructions 2>&1); rc=$?
+check "a dangling symlink chain (CLAUDE.md -> middle.md -> missing external file) is refused" \
+  "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+check "a dangling symlink chain: nothing gets created at the far end, and middle.md itself is untouched" \
+  "$([ ! -e "$work/instr-escape-chain-missing-external.md" ] && [ -L "$r/middle.md" ]; echo $?)" \
+  "far end exists: $([ -e "$work/instr-escape-chain-missing-external.md" ] && echo yes || echo no); middle.md is a symlink: $([ -L "$r/middle.md" ] && echo yes || echo no)"
+
+r=$(new_repo instr-escape-symlinked-dir); mkdir -p "$r/.codegraph"
+printf 'leaked\n' > "$work/instr-escape-symlinked-dir-target.md"
+ln -s "$work" "$r/through"
+ln -s through/../instr-escape-symlinked-dir-target.md "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1); rc=$?
+check "a relative dangling-looking link through a symlinked directory, resolving outside the repo, is refused" \
+  "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+grep -qxF 'leaked' "$work/instr-escape-symlinked-dir-target.md"
+check "symlinked-directory escape: the external target is untouched" $? \
+  "got: $(cat "$work/instr-escape-symlinked-dir-target.md" 2>/dev/null)"
+
+r=$(new_repo instr-escape-inrepo-still-works); mkdir -p "$r/.codegraph" "$r/sub"
+printf 'hi\n' > "$r/sub/real.md"
+ln -s sub "$r/through"
+ln -s through/../sub/real.md "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1); rc=$?
+check "a symlink through a symlinked directory that stays inside the repo still works" \
+  "$([ "$rc" = 0 ]; echo $?)" "exit code was $rc; output: $out"
+grep -qF '<!-- repo-intel:begin -->' "$r/sub/real.md"
+check "...and the real target actually received the block" $? "got: $(cat "$r/sub/real.md" 2>/dev/null)"
+
+r=$(new_repo instr-escape-doctor-dangling); mkdir -p "$r/.codegraph"
+ln -s nonexistent-target.md "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" doctor 2>&1); rc=$?
+echo "$out" | grep -qE '^  instructions +invalid \(dangling symlink\)$'
+check "doctor reports invalid (dangling symlink) rather than present or missing" $? "got: $out"
+check "doctor's exit status is unaffected by a dangling symlink" "$([ "$rc" = 0 ]; echo $?)" "exit code was $rc"
+
+echo "instructions: unterminated code fence"
+
+r=$(new_repo instr-unterminated-fence); mkdir -p "$r/.codegraph"
+printf 'Notes\n\n```\nunclosed fence, no closing backticks below\n' > "$r/CLAUDE.md"
+cp "$r/CLAUDE.md" "$work/instr-unterminated-fence.orig"
+out=$(cd "$r" && "$cli" instructions 2>&1); rc=$?
+check "a file ending inside an open fence: instructions dies instead of appending inside it" \
+  "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+echo "$out" | grep -q 'unterminated code fence'
+check "the die message names the problem" $? "got: $out"
+cmp -s "$r/CLAUDE.md" "$work/instr-unterminated-fence.orig"
+check "an unterminated fence: the file is left untouched" $? "got: $(cat "$r/CLAUDE.md")"
+out=$(cd "$r" && "$cli" doctor 2>&1)
+echo "$out" | grep -qE '^  instructions +invalid \('
+check "doctor reports invalid for an unterminated fence" $? "got: $out"
+
+echo "instructions: atomic write"
+
+# A fake `cat` that fails only when asked to read FROM a temp file (matched
+# by basename, never by the full path: the test's own $work dir is itself
+# under a mktemp'd directory, so a path-wide match would misfire on every
+# real file too). This is exactly the shape of the old bug: `cat "$tmp" >
+# "$file"` reads the temp to write the real file; a tool that behaves fine on
+# every other read but fails on that one specific read is what "a failing
+# copy" means here. Real reads (of CLAUDE.md, of the repo's other files)
+# still go through to the real cat.
+mkdir -p "$work/failcat"
+cat > "$work/failcat/cat" <<'FAKECAT'
+#!/bin/sh
+for a in "$@"; do
+  case "$(basename "$a" 2>/dev/null)" in
+    tmp.*|.repo-intel-instructions.*) exit 1 ;;
+  esac
+done
+exec /bin/cat "$@"
+FAKECAT
+chmod +x "$work/failcat/cat"
+
+r=$(new_repo instr-atomic-failure); mkdir -p "$r/.codegraph"
+printf 'ORIGINAL CONTENT, MUST SURVIVE A FAILED WRITE\n' > "$r/CLAUDE.md"
+out=$(cd "$r" && PATH="$work/failcat:$PATH" "$cli" instructions 2>&1); rc=$?
+check "a failing read of the temp file never leaves CLAUDE.md truncated to empty" \
+  "$([ -s "$r/CLAUDE.md" ]; echo $?)" "exit code was $rc; output: $out; got $(wc -c < "$r/CLAUDE.md" 2>/dev/null) bytes"
+leftover=$(find "$r" -maxdepth 1 -name '.repo-intel-instructions.*' 2>/dev/null)
+check "a failing read of the temp file: no stray temp file is left behind" "$([ -z "$leftover" ]; echo $?)" "found: $leftover"
+
+# This one uses an update (a block already present, a second graph appears),
+# not an add: that is the path where sed actually copies real content ranges
+# into the candidate, rather than just an optional CRLF probe that fails
+# open and harmlessly falls back to "no CRLF" without aborting anything.
+r=$(new_repo instr-atomic-build-failure); mkdir -p "$r/.codegraph"
+printf 'ORIGINAL CONTENT, MUST SURVIVE A FAILED BUILD\n' > "$r/CLAUDE.md"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+cp "$r/CLAUDE.md" "$work/instr-atomic-build-failure.orig"
+mkdir -p "$r/graphify-out"; echo '{}' > "$r/graphify-out/graph.json"
+mkdir -p "$work/failsed"
+cat > "$work/failsed/sed" <<'FAKESED'
+#!/bin/sh
+exit 1
+FAKESED
+chmod +x "$work/failsed/sed"
+out=$(cd "$r" && PATH="$work/failsed:$PATH" "$cli" instructions 2>&1); rc=$?
+check "a failing tool while building the candidate makes instructions exit nonzero" \
+  "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+cmp -s "$r/CLAUDE.md" "$work/instr-atomic-build-failure.orig"
+check "a failing tool while building the candidate: the original (pre-update) file is byte-for-byte untouched" $? \
+  "got: $(cat "$r/CLAUDE.md" 2>/dev/null)"
+
+r=$(new_repo instr-atomic-mode); mkdir -p "$r/.codegraph"
+printf 'notes\n' > "$r/CLAUDE.md"
+chmod 640 "$r/CLAUDE.md"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+mode1=$(/bin/ls -l "$r/CLAUDE.md" | awk '{print $1}')
+mkdir -p "$r/graphify-out"; echo '{}' > "$r/graphify-out/graph.json"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+mode2=$(/bin/ls -l "$r/CLAUDE.md" | awk '{print $1}')
+check "file mode (640) is preserved across add" "$([ "$mode1" = "-rw-r-----@" ] || [ "$mode1" = "-rw-r-----" ]; echo $?)" "got: $mode1"
+check "file mode (640) is preserved across update" "$([ "$mode2" = "-rw-r-----@" ] || [ "$mode2" = "-rw-r-----" ]; echo $?)" "got: $mode2"
+
+r=$(new_repo instr-atomic-symlink); mkdir -p "$r/.codegraph"
+printf 'shared\n' > "$r/AGENTS.md"
+ln -s AGENTS.md "$r/CLAUDE.md"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+mkdir -p "$r/graphify-out"; echo '{}' > "$r/graphify-out/graph.json"
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+check "CLAUDE.md stays a symlink after an atomic update through it" "$([ -L "$r/CLAUDE.md" ]; echo $?)" "symlink replaced"
+grep -q 'graphify query' "$r/AGENTS.md"
+check "...and the update actually landed on the real file" $? "got: $(cat "$r/AGENTS.md" 2>/dev/null)"
+
+echo "instructions: mode seeding, umask, hardlinks"
+
+mkdir -p "$work/failcp"
+cat > "$work/failcp/cp" <<'FAKECP'
+#!/bin/sh
+exit 1
+FAKECP
+chmod +x "$work/failcp/cp"
+
+r=$(new_repo instr-failcp); mkdir -p "$r/.codegraph"
+printf 'ORIGINAL CONTENT, MUST SURVIVE A FAILED MODE COPY\n' > "$r/CLAUDE.md"
+chmod 644 "$r/CLAUDE.md"
+out=$(cd "$r" && PATH="$work/failcp:$PATH" "$cli" instructions 2>&1); rc=$?
+check "a failing cp while seeding the temp file's mode makes instructions exit nonzero" \
+  "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+grep -qxF 'ORIGINAL CONTENT, MUST SURVIVE A FAILED MODE COPY' "$r/CLAUDE.md"
+check "a failing cp while seeding the mode: the original content is untouched" $? \
+  "got: $(cat "$r/CLAUDE.md" 2>/dev/null)"
+find "$r/CLAUDE.md" -perm 644 | grep -q .
+check "a failing cp while seeding the mode: the original mode (644) is untouched, not silently dropped to 600" \
+  $? "got: $(/bin/ls -l "$r/CLAUDE.md" 2>/dev/null)"
+leftover=$(find "$r" -maxdepth 1 -name '.repo-intel-instructions.*' 2>/dev/null)
+check "a failing cp while seeding the mode: no stray temp file is left behind" "$([ -z "$leftover" ]; echo $?)" "found: $leftover"
+
+r=$(new_repo instr-umask-restrictive); mkdir -p "$r/.codegraph"
+(cd "$r" && umask 077 && "$cli" instructions >/dev/null 2>&1)
+find "$r/CLAUDE.md" -perm 600 | grep -q .
+check "a brand new CLAUDE.md respects a restrictive umask (077 -> 600)" $? "got: $(/bin/ls -l "$r/CLAUDE.md" 2>/dev/null)"
+
+r=$(new_repo instr-umask-default); mkdir -p "$r/.codegraph"
+(cd "$r" && umask 022 && "$cli" instructions >/dev/null 2>&1)
+find "$r/CLAUDE.md" -perm 644 | grep -q .
+check "a brand new CLAUDE.md respects the default umask (022 -> 644)" $? "got: $(/bin/ls -l "$r/CLAUDE.md" 2>/dev/null)"
+
+r=$(new_repo instr-umask-group-writable); mkdir -p "$r/.codegraph"
+(cd "$r" && umask 002 && "$cli" instructions >/dev/null 2>&1)
+find "$r/CLAUDE.md" -perm 664 | grep -q .
+check "a brand new CLAUDE.md respects a group-writable umask (002 -> 664)" $? "got: $(/bin/ls -l "$r/CLAUDE.md" 2>/dev/null)"
+
+r=$(new_repo instr-hardlinked); mkdir -p "$r/.codegraph"
+printf 'shared content\n' > "$r/CLAUDE.md"
+ln "$r/CLAUDE.md" "$r/AGENTS.md"
+# A third hardlink outside the repo, as a witness to the ORIGINAL inode: if
+# CLAUDE.md got replaced by something that happens to match AGENTS.md (e.g.
+# both un-shared the same way), comparing only CLAUDE.md to AGENTS.md
+# afterwards would miss that; this witness would not match either.
+ln "$r/CLAUDE.md" "$work/instr-hardlinked-witness"
+out=$(cd "$r" && "$cli" instructions 2>&1); rc=$?
+check "a hardlinked CLAUDE.md/AGENTS.md pair: instructions dies instead of un-sharing them" \
+  "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
+echo "$out" | grep -q 'CLAUDE.md'
+check "the die message names the hardlinked file" $? "got: $out"
+grep -qxF 'shared content' "$r/CLAUDE.md" && grep -qxF 'shared content' "$r/AGENTS.md"
+check "a hardlinked pair: both files are left with their original content" $? \
+  "CLAUDE.md: $(cat "$r/CLAUDE.md" 2>/dev/null); AGENTS.md: $(cat "$r/AGENTS.md" 2>/dev/null)"
+find "$r/CLAUDE.md" -samefile "$r/AGENTS.md" | grep -q . && find "$r/CLAUDE.md" -samefile "$work/instr-hardlinked-witness" | grep -q .
+check "a hardlinked pair: the inode is still shared (unchanged from before the attempt)" $? \
+  "CLAUDE.md and AGENTS.md no longer share an inode, or neither matches the original"
+
+r=$(new_repo instr-hardlinked-doctor); mkdir -p "$r/.codegraph"
+printf 'shared\n' > "$r/CLAUDE.md"
+ln "$r/CLAUDE.md" "$r/AGENTS.md"
+out=$(cd "$r" && "$cli" doctor 2>&1); rc=$?
+echo "$out" | grep -qE '^  instructions +invalid \(hardlinked file\)$'
+check "doctor reports invalid (hardlinked file) for a hardlinked pair" $? "got: $out"
+check "doctor's exit status is unaffected by a hardlinked pair" "$([ "$rc" = 0 ]; echo $?)" "exit code was $rc"
+
 echo "graphify contract (real binary)"
 real_graphify=$(PATH=$orig_path command -v graphify 2>/dev/null || true)
 if [ -z "$real_graphify" ]; then
