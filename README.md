@@ -18,7 +18,8 @@ Then, in the repository: `/repo-intel:setup`, or by hand:
 
 ```bash
 repo-intel doctor
-repo-intel install                       # install or upgrade to latest: graphify via uv/pipx, codegraph via pnpm/npm
+repo-intel install                       # install or upgrade to latest: graphify via uv/pipx, codegraph via pnpm/npm,
+                                         # and import this plugin's CLAUDE.md from the global one
 repo-intel config --backend litellm --model deepseek/deepseek-v4-flash
 repo-intel setup                         # index, .gitignore, graphify git hooks, first build
 repo-intel instructions                  # CLAUDE.md/AGENTS.md note so agents without this plugin use the graphs too
@@ -29,12 +30,27 @@ Requirements: `git`, `jq`, and `uv`/`pipx` plus `pnpm`/`npm` for the installs.
 
 ## What the agent gets
 
-| Event | Behaviour | Cost when the repo has no graph |
-|---|---|---|
-| SessionStart | One short routing note: codegraph for structure, graphify for concepts, rg for literal text. Flags docs changed since the last `repo-intel build` (graphify's own git hook keeps code current). Warns about an unreadable `.repo-intel.json`. | one `sh` + `jq`, no output |
-| UserPromptSubmit | Runs `codegraph prompt-hook` only for prompts that look structural ("who calls", "what breaks", a camelCase or snake_case symbol, a file path; English and Polish). Other prompts never start node. | same |
-| PreToolUse Bash, Grep, Glob | The first search in a session gets a one-line pointer to the graphs. Never repeated, never blocks. | same |
-| PreToolUse Skill, Agent, Task | With a backend configured, denies `/graphify` builds and graphify extraction subagents (also in a repo with no graph yet) and points to `repo-intel build`. `/graphify query`, `path` and `explain` stay allowed. `repo-intel config --backend agent` turns the guard off. | same |
+Routing lives in [`claude/CLAUDE.md`](claude/CLAUDE.md): codegraph for structure, graphify
+for concepts, rg for literal text and complete call-site lists. `repo-intel install` (or
+`repo-intel install claude-md` alone) adds a managed block to
+`${CLAUDE_CONFIG_DIR:-~/.claude}/CLAUDE.md` that imports it with `@<path>`. Re-running
+replaces the block in place, backs up the file first, and edits through a symlink.
+
+The import points at the installed plugin version. After a plugin update the old
+directory can disappear and the import breaks without a message. `repo-intel doctor`
+reports that, and `repo-intel install claude-md` fixes it.
+
+`repo-intel doctor` also reports a graphify graph as stale when docs changed since the
+last `repo-intel build` (graphify's own git hook keeps code current).
+
+One hook remains, a guard on PreToolUse Skill, Agent and Task. With a backend configured
+it denies `/graphify` builds and graphify extraction subagents (also in a repo with no
+graph yet) and points to `repo-intel build`. `/graphify query`, `path` and `explain` stay
+allowed. `repo-intel config --backend agent` turns the guard off. It costs one `sh` and
+one `jq` call for unrelated tools. There are no per-prompt or per-search hooks.
+
+The global import covers your own sessions in every repo. The per-repo block below covers
+everyone else. Where both exist, the agent sees the same advice twice, which is harmless.
 
 `repo-intel instructions` writes a short "Code graphs" block into `CLAUDE.md`
 and `AGENTS.md` at the repo root, so an agent without this plugin (Codex, Cursor,
@@ -94,7 +110,7 @@ Grep, Read and Glob) or `codegraph prompt-hook` (every prompt), both fire next t
 plugin. `repo-intel migrate-hooks --apply` removes exactly those entries (bare, `npx`,
 `uvx` or absolute-path forms), keeps a timestamped backup and prints the undo command.
 A symlinked `settings.json` is edited through the link, so a dotfiles setup stays intact.
-`hook-guard read` is dropped rather than replaced: repo-intel nudges on searches only.
+`hook-guard read` is dropped rather than replaced; the routing note in `claude/CLAUDE.md` covers searches.
 
 ## Tests
 

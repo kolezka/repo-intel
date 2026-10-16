@@ -1,6 +1,6 @@
 ---
 name: build
-description: Use when the user asks to build, rebuild, refresh or update the codegraph index or the graphify knowledge graph, or when a repo-intel hook says the graph is older than the last commit.
+description: Use when the user asks to build, rebuild, refresh or update the codegraph index or the graphify knowledge graph, or when `repo-intel doctor` reports the graph as stale.
 ---
 
 # repo-intel build

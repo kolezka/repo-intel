@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "repo-intel",
-  "description": "codegraph + graphify setup, routing hooks and LLM backend control",
+  "description": "codegraph + graphify setup, CLAUDE.md routing and LLM backend control",
   "owner": { "name": "Mariusz Rakus" },
   "plugins": [
     {

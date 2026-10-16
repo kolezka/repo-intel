@@ -6,9 +6,12 @@ usage() {
   cat <<'EOF'
 Usage: repo-intel <command> [options]
 
-  doctor                     Report tools, config, graphs and duplicate global hooks
-  install [graphify|codegraph|all]
-                             Install or upgrade to latest (graphify via uv/pipx, codegraph via pnpm/npm)
+  doctor                     Report tools, config, graphs (and if stale), the CLAUDE.md import
+                             and duplicate global hooks
+  install [graphify|codegraph|claude-md|all]
+                             Install or upgrade to latest (graphify via uv/pipx, codegraph via pnpm/npm),
+                             and reference this plugin's CLAUDE.md from the global one
+                             (${CLAUDE_CONFIG_DIR:-~/.claude}/CLAUDE.md)
   setup                      In the current git repo: index codegraph, add .gitignore
                              entries, install graphify git hooks, then build
   config [--global] --backend B [--model M] [--base-url URL]
@@ -38,6 +41,9 @@ have() { command -v "$1" >/dev/null 2>&1; }
 repo_root() { git rev-parse --show-toplevel 2>/dev/null || die "not inside a git repository"; }
 user_config() { printf '%s/repo-intel/config.json' "${XDG_CONFIG_HOME:-$HOME/.config}"; }
 settings_file() { printf '%s/settings.json' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; }
+global_claude_md() { printf '%s/CLAUDE.md' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; }
+plugin_root=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
+plugin_claude_md="$plugin_root/claude/CLAUDE.md"
 
 # Sets BACKEND, MODEL and BASE_URL from one source, same rule as the hook:
 # env, else the first config file that names a backend (repo root, then user).
@@ -65,7 +71,7 @@ resolve_llm() {
 replaced_hooks='(^|[/[:space:]])graphify hook-guard|(^|[/[:space:]])codegraph prompt-hook'
 
 cmd_doctor() {
-  local ok=0 root settings dup t
+  local ok=0 root settings dup t imported
   for t in jq git graphify codegraph; do
     if have "$t"; then
       printf '  %-15s %s\n' "$t" "$("$t" --version 2>/dev/null | head -1)"
@@ -79,7 +85,9 @@ cmd_doctor() {
     printf '  %-15s %s\n' repo "$root"
     if [[ -d $root/.codegraph ]]; then printf '  %-15s present\n' codegraph-index; has_cg=1
     else printf '  %-15s none (run: repo-intel setup)\n' codegraph-index; fi
-    if [[ -f $root/graphify-out/graph.json ]]; then printf '  %-15s present\n' graphify-graph; has_gf=1
+    if [[ -f $root/graphify-out/graph.json ]]; then
+      printf '  %-15s present\n' graphify-graph; has_gf=1
+      graph_is_stale "$root" && printf '  %-15s stale: docs changed since the last build (run: repo-intel build)\n' graphify-graph
     else printf '  %-15s none (run: repo-intel build)\n' graphify-graph; fi
     instructions_status "$root" "$has_cg" "$has_gf"
     printf '  %-15s %s\n' instructions "$INSTR_STATUS"
@@ -92,7 +100,72 @@ cmd_doctor() {
       | select(test($re))] | unique | join(", ")' "$settings")
     [[ -n $dup ]] && printf '  %-15s duplicate global hooks: %s (run: repo-intel migrate-hooks)\n' hooks "$dup"
   fi
+  if ! imported=$(claude_md_import "$(global_claude_md)"); then
+    printf '  %-15s malformed repo-intel:global block in %s (fix it by hand)\n' claude-md "$(global_claude_md)"; ok=1
+  elif [[ -z $imported ]]; then
+    printf '  %-15s not referenced from %s (run: repo-intel install claude-md)\n' claude-md "$(global_claude_md)"
+  elif [[ ! -f $imported ]]; then
+    # A plugin update removes the old version's directory, which silently drops the import.
+    printf '  %-15s broken import, %s is gone (run: repo-intel install claude-md)\n' claude-md "$imported"; ok=1
+  elif [[ $imported != "$plugin_claude_md" ]]; then
+    printf '  %-15s imports another copy: %s (run: repo-intel install claude-md)\n' claude-md "$imported"
+  else
+    printf '  %-15s %s\n' claude-md "$imported"
+  fi
   return $ok
+}
+
+# graphify's own git hook keeps code fresh; only docs changed since the last build need an LLM pass.
+graph_is_stale() {
+  local root=$1 built changed
+  built=$(cat "$root/graphify-out/.repo-intel-built" 2>/dev/null || true)
+  [[ -n $built ]] || return 1
+  # Capture first: grep -q on a pipe can SIGPIPE git, which pipefail reports as no match.
+  changed=$(git -C "$root" diff --name-only "$built" HEAD -- . 2>/dev/null | grep -v '^graphify-out/' || true)
+  grep -Eiq '\.(md|mdx|markdown|txt|rst|pdf|docx|xlsx|png|jpe?g|webp|gif)$' <<<"$changed"
+}
+
+claude_md_begin='<!-- repo-intel:global:begin -->'
+claude_md_end='<!-- repo-intel:global:end -->'
+
+# The global block reuses the instructions_* helpers (single ordered marker pair,
+# CRLF, fences, mode-preserving atomic writes) with its own markers. bash's dynamic
+# scoping lets these locals override instr_begin/instr_end inside the helpers.
+
+# Prints the path the managed block imports, or nothing. Returns 1 on a malformed block.
+claude_md_import() {
+  local instr_begin=$claude_md_begin instr_end=$claude_md_end
+  [[ -f $1 ]] || return 0
+  instructions_locate "$1"
+  [[ $LOC_OK == 1 ]] || return 1
+  [[ -n $LOC_BEGIN ]] || return 0
+  sed -n "${LOC_BEGIN},${LOC_END}s/^@//p" "$1" | tr -d '\r' | head -1
+}
+
+# The import points at this plugin version's copy, so a plugin update needs a re-run
+# (doctor reports a broken import).
+install_claude_md() {
+  local instr_begin=$claude_md_begin instr_end=$claude_md_end target backup="" block
+  target=$(global_claude_md)
+  mkdir -p "$(dirname "$target")"
+  [[ -L $target && ! -e $target ]] && die "$target is a dangling symlink; fix the link first"
+  # Edit the real file so a dotfiles symlink stays a symlink.
+  [[ -e $target ]] && target=$(realpath "$target")
+  instructions_check_target "$target"
+  instructions_locate "$target"
+  [[ $LOC_OK == 1 ]] || die "$target: $LOC_REASON; fix it by hand"
+  block="$claude_md_begin"$'\n'"<!-- Managed by \`repo-intel install\`; edits between these markers are overwritten. -->"$'\n'"@$plugin_claude_md"$'\n'"$claude_md_end"
+  if [[ -f $target ]]; then
+    # mktemp keeps backups unique even for two installs in the same second.
+    backup=$(mktemp "$target.bak-repo-intel-$(date +%Y%m%d%H%M%S).XXXXXX") || die "could not create a backup next to $target"
+    cp -p "$target" "$backup" || die "could not back up $target"
+  fi
+  instructions_apply "$target" "$block" ""
+  if [[ $ISTATUS == unchanged ]]; then
+    [[ -n $backup ]] && rm -f "$backup"
+    info "$target already imports $plugin_claude_md"; return 0
+  fi
+  info "$target now imports $plugin_claude_md${backup:+; backup at $backup (undo: cp \"$backup\" \"$target\")}"
 }
 
 cmd_install() {
@@ -127,7 +200,8 @@ cmd_install() {
       [[ -n $v ]] && info "codegraph: $v"
     fi
   fi
-  have jq || info "jq is missing; the hooks stay silent without it (brew install jq)"
+  if [[ $what == all || $what == claude-md ]]; then install_claude_md; fi
+  have jq || info "jq is missing; the build guard hook stays off without it (brew install jq)"
 }
 
 ensure_gitignore() {
@@ -278,7 +352,7 @@ cmd_build() {
   fi
 
   [[ $code_only == 1 ]] && return
-  # The session-start hook compares docs changed since this commit.
+  # doctor compares docs changed since this commit.
   mkdir -p "$root/graphify-out"
   git -C "$root" rev-parse HEAD > "$root/graphify-out/.repo-intel-built" 2>/dev/null || true
 }
@@ -294,7 +368,7 @@ cmd_migrate_hooks() {
   [[ -n $found ]] || { info "no duplicate global hooks"; return 0; }
   printf 'Global hooks replaced by repo-intel (in %s):\n%s\n' "$settings" "$found"
   grep -q 'hook-guard read' <<<"$found" && \
-    info "note: hook-guard read (Read/Glob) is dropped, not replaced; repo-intel nudges on searches only"
+    info "note: hook-guard read (Read/Glob) is dropped, not replaced; the routing note in claude/CLAUDE.md covers searches"
   [[ $apply == 1 ]] || { info "dry run; re-run with --apply"; return 0; }
   backup="$settings.bak-repo-intel-$(date +%Y%m%d%H%M%S)"
   cp "$settings" "$backup"

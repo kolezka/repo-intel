@@ -113,34 +113,18 @@ run_hook() { # event, json
 
 echo "hook"
 
-plain=$(new_repo plain)
-out=$(run_hook session-start "$(hook_json "$plain")")
-check "silent in a repo without graphs" "$([ -z "$out" ]; echo $?)" "got: $out"
-
-cg=$(new_repo cg); mkdir -p "$cg/.codegraph" "$cg/src"
-out=$(run_hook session-start "$(hook_json "$cg/src")")
-echo "$out" | jq -e '.hookSpecificOutput.additionalContext | test("codegraph")' >/dev/null
-check "session-start routes to codegraph from a subdirectory" $? "got: $out"
-echo "$out" | jq -e '.hookSpecificOutput.additionalContext | test("graphify query") | not' >/dev/null
-check "session-start omits graphify when it has no graph" $? "got: $out"
+hooks_json="$here/hooks/hooks.json"
+jq -e '(.hooks | keys) == ["PreToolUse"] and (.hooks.PreToolUse | length) == 1
+  and .hooks.PreToolUse[0].matcher == "Skill|Agent|Task"' "$hooks_json" >/dev/null
+check "hooks.json registers only the build guard (no per-prompt or per-search hooks)" $? "got: $(jq -c . "$hooks_json")"
 
 both=$(new_repo both); mkdir -p "$both/.codegraph" "$both/graphify-out"; echo '{}' > "$both/graphify-out/graph.json"
-out=$(run_hook session-start "$(hook_json "$both")")
-echo "$out" | jq -e '.hookSpecificOutput.additionalContext | test("older than") | not' >/dev/null
-check "no stale warning without a build marker" $? "got: $out"
-
-search=$(hook_json "$both" '{"tool_name":"Bash","tool_input":{"command":"cd src && rg -n foo"}}')
-out=$(run_hook pre-search "$search")
-echo "$out" | jq -e '.hookSpecificOutput.hookEventName == "PreToolUse"' >/dev/null
-check "pre-search nudges on the first rg" $? "got: $out"
-out=$(run_hook pre-search "$search")
-check "pre-search stays silent after the first nudge" "$([ -z "$out" ]; echo $?)" "got: $out"
-
-out=$(run_hook pre-search "$(jq -cn --arg cwd "$both" '{session_id:"s2",cwd:$cwd,tool_name:"Bash",tool_input:{command:"ls -la"}}')")
-check "pre-search ignores non-search commands" "$([ -z "$out" ]; echo $?)" "got: $out"
-
-out=$(run_hook pre-search "$(jq -cn --arg cwd "$both" '{session_id:"s3",cwd:$cwd,tool_name:"Bash",tool_input:{command:"echo hi\nfind . -name x"}}')")
-check "pre-search sees a search on a later line" "$([ -n "$out" ]; echo $?)" "got nothing"
+printf '{"llm":{"backend":"litellm"}}' > "$both/.repo-intel.json"
+for ev in session-start prompt pre-search; do
+  out=$(run_hook "$ev" "$(hook_json "$both" '{"tool_name":"Bash","tool_input":{"command":"rg -n foo"},"prompt":"who calls parseConfig?"}')")
+  check "hook prints nothing for the retired $ev event" "$([ -z "$out" ]; echo $?)" "got: $out"
+done
+rm -f "$both/.repo-intel.json"
 
 skill_full=$(hook_json "$both" '{"tool_name":"Skill","tool_input":{"skill":"graphify","args":"."}}')
 out=$(run_hook pre-llm "$skill_full")
@@ -189,44 +173,130 @@ out=$(run_hook pre-llm "$(hook_json "$both" '{"tool_name":"Task","tool_input":{"
 echo "$out" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("backend agent")' >/dev/null 2>&1
 check "pre-llm covers the older Task tool name and names the opt-out" $? "got: $out"
 
+ms() { perl -MTime::HiRes=time -e 'printf "%.0f", time*1000'; }
+payload=$(hook_json "$both" '{"tool_name":"Skill","tool_input":{"skill":"superpowers:brainstorming"}}')
+start=$(ms)
+for _ in 1 2 3 4 5 6 7 8 9 10; do printf '%s' "$payload" | sh "$hook" pre-llm >/dev/null; done
+avg=$(( ($(ms) - start) / 10 ))
+printf '       (pre-llm on an unrelated skill: %s ms avg)\n' "$avg"
+check "build guard is fast on unrelated tools (<100 ms)" "$([ "$avg" -lt 100 ]; echo $?)" "avg ${avg} ms"
+
+echo "doctor"
+
 stale=$(new_repo stale); mkdir -p "$stale/graphify-out"; echo '{}' > "$stale/graphify-out/graph.json"
+out=$(cd "$stale" && "$cli" doctor 2>&1)
+check "doctor: no stale warning without a build marker" "$(! echo "$out" | grep -q 'stale:'; echo $?)" "got: $out"
 git -C "$stale" rev-parse HEAD > "$stale/graphify-out/.repo-intel-built"
-sleep 1
 git -C "$stale" add -A && git -C "$stale" -c user.email=t@t -c user.name=t commit -qm "commit the graph"
-out=$(run_hook session-start "$(hook_json "$stale")")
-echo "$out" | jq -e '.hookSpecificOutput.additionalContext | test("older than") | not' >/dev/null
-check "committing only the graph does not mark it stale" $? "got: $out"
+out=$(cd "$stale" && "$cli" doctor 2>&1)
+check "doctor: committing only the graph does not mark it stale" "$(! echo "$out" | grep -q 'stale:'; echo $?)" "got: $out"
 echo 'x = 1' > "$stale/app.py"
 git -C "$stale" add -A && git -C "$stale" -c user.email=t@t -c user.name=t commit -qm "code change"
-out=$(run_hook session-start "$(hook_json "$stale")")
-echo "$out" | jq -e '.hookSpecificOutput.additionalContext | test("older than") | not' >/dev/null
-check "a code-only commit does not mark the graph stale (graphify's git hook covers code)" $? "got: $out"
+out=$(cd "$stale" && "$cli" doctor 2>&1)
+check "doctor: a code-only commit does not mark the graph stale" "$(! echo "$out" | grep -q 'stale:'; echo $?)" "got: $out"
 echo '# decision' > "$stale/DECISIONS.md"
 git -C "$stale" add -A && git -C "$stale" -c user.email=t@t -c user.name=t commit -qm "doc change"
-out=$(run_hook session-start "$(hook_json "$stale")")
-echo "$out" | jq -e '.hookSpecificOutput.additionalContext | test("older than the docs")' >/dev/null
-check "a doc commit after the build marks the graph stale" $? "got: $out"
+out=$(cd "$stale" && "$cli" doctor 2>&1)
+check "doctor: a doc commit after the build marks the graph stale" "$(echo "$out" | grep -q 'stale: docs changed'; echo $?)" "got: $out"
 
-bad=$(new_repo bad); mkdir -p "$bad/.codegraph"; printf '{not json' > "$bad/.repo-intel.json"
-out=$(run_hook session-start "$(hook_json "$bad")")
-echo "$out" | jq -e '.hookSpecificOutput.additionalContext | test("not valid JSON")' >/dev/null
-check "session-start warns about an unreadable .repo-intel.json" $? "got: $out"
+echo "claude-md"
 
-rm -f "$work/codegraph.log"
-out=$(run_hook prompt "$(hook_json "$both" '{"prompt":"write a haiku about autumn"}')")
-check "prompt skips codegraph for non-structural prompts" "$([ -z "$out" ] && [ ! -e "$work/codegraph.log" ]; echo $?)" "got: $out"
-out=$(run_hook prompt "$(hook_json "$both" '{"prompt":"who calls parseConfig?"}')")
-check "prompt delegates structural prompts to codegraph prompt-hook" "$([ "$out" = "<codegraph_context>fake</codegraph_context>" ]; echo $?)" "got: $out"
-out=$(run_hook prompt "$(hook_json "$both" '{"prompt":"gdzie jest zdefiniowany limit?"}')")
-check "prompt recognises Polish structural prompts" "$([ -n "$out" ]; echo $?)" "got nothing"
+plugin_md=$(realpath "$here/claude/CLAUDE.md")
+check "the plugin ships claude/CLAUDE.md" "$([ -s "$plugin_md" ]; echo $?)" "missing $plugin_md"
+gmd="$CLAUDE_CONFIG_DIR/CLAUDE.md"
+count_blocks() { grep -c '^<!-- repo-intel:global:begin' "$1"; }
 
-ms() { perl -MTime::HiRes=time -e 'printf "%.0f", time*1000'; }
-payload=$(hook_json "$plain")
-start=$(ms)
-for _ in 1 2 3 4 5 6 7 8 9 10; do printf '%s' "$payload" | sh "$hook" session-start >/dev/null; done
-avg=$(( ($(ms) - start) / 10 ))
-printf '       (no-graph session-start: %s ms avg)\n' "$avg"
-check "hook is fast when the repo has no graph (<100 ms)" "$([ "$avg" -lt 100 ]; echo $?)" "avg ${avg} ms"
+rm -f "$gmd"
+"$cli" install claude-md >/dev/null 2>&1
+check "install claude-md creates the global CLAUDE.md with the import" \
+  "$(grep -qxF "@$plugin_md" "$gmd" 2>/dev/null && [ "$(count_blocks "$gmd")" = 1 ]; echo $?)" "got: $(cat "$gmd" 2>/dev/null)"
+
+printf '# Mine\nkeep me' > "$gmd"
+"$cli" install claude-md >/dev/null 2>&1
+check "install claude-md keeps existing content and appends one block" \
+  "$(head -2 "$gmd" | grep -qx 'keep me' && grep -qxF "@$plugin_md" "$gmd" && [ "$(count_blocks "$gmd")" = 1 ]; echo $?)" "got: $(cat "$gmd")"
+check "install claude-md backs up the file it changed" \
+  "$(ls "$gmd".bak-repo-intel-* >/dev/null 2>&1; echo $?)" "no backup next to $gmd"
+
+before=$(cat "$gmd"); rm -f "$gmd".bak-repo-intel-*
+"$cli" install claude-md >/dev/null 2>&1
+check "install claude-md is idempotent (no change, no backup)" \
+  "$([ "$(cat "$gmd")" = "$before" ] && ! ls "$gmd".bak-repo-intel-* >/dev/null 2>&1; echo $?)" "got: $(cat "$gmd")"
+
+printf 'top\n<!-- repo-intel:global:begin -->\n@/gone/0.0.1/claude/CLAUDE.md\n<!-- repo-intel:global:end -->\nbottom\n' > "$gmd"
+out=$("$cli" doctor 2>&1); rc=$?
+check "doctor flags a broken import and exits nonzero" \
+  "$(echo "$out" | grep -q 'broken import' && [ $rc != 0 ]; echo $?)" "rc=$rc got: $out"
+"$cli" install claude-md >/dev/null 2>&1
+check "install claude-md repoints an old block in place" \
+  "$(grep -qxF "@$plugin_md" "$gmd" && ! grep -q '/gone/' "$gmd" && [ "$(head -1 "$gmd")" = top ] && [ "$(tail -1 "$gmd")" = bottom ] && [ "$(count_blocks "$gmd")" = 1 ]; echo $?)" "got: $(cat "$gmd")"
+out=$("$cli" doctor 2>&1)
+check "doctor reports the import as healthy after install" "$(echo "$out" | grep -qE "claude-md +$plugin_md"; echo $?)" "got: $out"
+
+printf 'x\n<!-- repo-intel:global:begin -->\n@/a\nno end marker\n' > "$gmd"; before=$(cat "$gmd")
+"$cli" install claude-md >/dev/null 2>&1; rc=$?
+check "install claude-md refuses a block with no end marker and leaves the file alone" \
+  "$([ $rc != 0 ] && [ "$(cat "$gmd")" = "$before" ]; echo $?)" "rc=$rc got: $(cat "$gmd")"
+
+mkdir -p "$work/dotfiles-md"; printf 'dot\n' > "$work/dotfiles-md/CLAUDE.md"; rm -f "$gmd"; ln -s "$work/dotfiles-md/CLAUDE.md" "$gmd"
+"$cli" install claude-md >/dev/null 2>&1
+check "install claude-md edits through a symlinked CLAUDE.md" \
+  "$([ -L "$gmd" ] && grep -qxF "@$plugin_md" "$work/dotfiles-md/CLAUDE.md"; echo $?)" "link: $(ls -l "$gmd")"
+
+# Review regressions: the global writer must never lose, expose or detach user content.
+ib='<!-- repo-intel:global:begin -->'; ie='<!-- repo-intel:global:end -->'
+rm -f "$gmd"; printf 'a\n%s\n@/old\n%s\nmid\n%s\ndo not delete this\n' "$ib" "$ie" "$ib" > "$gmd"; before=$(cat "$gmd")
+"$cli" install claude-md >/dev/null 2>&1; rc=$?
+check "install claude-md refuses a second unmatched begin marker and keeps the file" \
+  "$([ $rc != 0 ] && [ "$(cat "$gmd")" = "$before" ]; echo $?)" "rc=$rc got: $(cat "$gmd")"
+out=$("$cli" doctor 2>&1); rc=$?
+check "doctor reports a malformed global block and exits nonzero" \
+  "$(echo "$out" | grep -q 'malformed' && [ $rc != 0 ]; echo $?)" "rc=$rc got: $out"
+
+printf '%s\n@%s\n' "$ib" "$plugin_md" > "$gmd"
+out=$("$cli" doctor 2>&1); rc=$?
+check "doctor does not call a block with no end marker healthy" \
+  "$(echo "$out" | grep -q 'malformed' && [ $rc != 0 ]; echo $?)" "rc=$rc got: $out"
+
+printf 'private\n' > "$gmd"; chmod 600 "$gmd"
+"$cli" install claude-md >/dev/null 2>&1
+check "install claude-md keeps the file's mode (0600 stays 0600)" \
+  "$([ "$(find "$gmd" -perm 0600 | wc -l | tr -d ' ')" = 1 ]; echo $?)" "mode: $(ls -l "$gmd")"
+chmod 644 "$gmd"
+
+printf 'win\r\n%s\r\n@/old\r\n%s\r\n' "$ib" "$ie" > "$gmd"
+"$cli" install claude-md >/dev/null 2>&1; rc=$?
+check "install claude-md updates a CRLF block and keeps CRLF" \
+  "$([ $rc = 0 ] && grep -qF "@$plugin_md"$'\r' "$gmd" && ! grep -q '/old' "$gmd"; echo $?)" "rc=$rc got: $(od -c "$gmd" | head -5)"
+out=$("$cli" doctor 2>&1)
+check "doctor reads a CRLF import as healthy" "$(echo "$out" | grep -qE "claude-md +$plugin_md\$"; echo $?)" "got: $out"
+
+rm -f "$gmd" "$gmd".bak-repo-intel-*; ln -s "$work/nowhere/CLAUDE.md" "$gmd"
+"$cli" install claude-md >/dev/null 2>&1; rc=$?
+check "install claude-md refuses a dangling symlink and keeps the link" \
+  "$([ $rc != 0 ] && [ -L "$gmd" ] && [ ! -e "$work/nowhere/CLAUDE.md" ]; echo $?)" "rc=$rc link: $(ls -l "$gmd")"
+
+rm -f "$gmd"; printf 'one\n' > "$gmd"
+"$cli" install claude-md >/dev/null 2>&1
+sed -i.sedbak 's|^@.*|@/old|' "$gmd" && rm -f "$gmd.sedbak"
+"$cli" install claude-md >/dev/null 2>&1
+check "two installs in the same second keep two distinct backups" \
+  "$([ "$(ls "$gmd".bak-repo-intel-* 2>/dev/null | wc -l | tr -d ' ')" = 2 ]; echo $?)" "backups: $(ls "$gmd".bak-repo-intel-* 2>/dev/null)"
+
+rm -f "$gmd" "$gmd".bak-repo-intel-*; printf 'shared\n' > "$work/hard-claude.md"; ln "$work/hard-claude.md" "$gmd"
+"$cli" install claude-md >/dev/null 2>&1; rc=$?
+check "install claude-md refuses a hardlinked CLAUDE.md" \
+  "$([ $rc != 0 ] && [ "$(cat "$work/hard-claude.md")" = shared ]; echo $?)" "rc=$rc"
+rm -f "$gmd" "$work/hard-claude.md"
+
+alt="$work/alt-claude"
+CLAUDE_CONFIG_DIR=$alt "$cli" install claude-md >/dev/null 2>&1
+check "install claude-md follows CLAUDE_CONFIG_DIR" "$(grep -qxF "@$plugin_md" "$alt/CLAUDE.md" 2>/dev/null; echo $?)" "nothing in $alt"
+
+rm -f "$gmd"
+PATH=$(install_path bin-uv bin-pnpm fakebin) "$cli" install >/dev/null 2>&1
+check "plain install also writes the CLAUDE.md import" "$(grep -qxF "@$plugin_md" "$gmd" 2>/dev/null; echo $?)" "got: $(cat "$gmd" 2>/dev/null)"
+rm -f "$gmd" "$work/uv.log" "$work/pnpm.log"
 
 echo "cli"
 
