@@ -11,7 +11,9 @@ The CLI is `repo-intel` (on PATH while the plugin is enabled; otherwise
 1. `repo-intel doctor`. Read the report, then act only on what it lists.
 2. Missing `graphify` or `codegraph`: ask the user before installing, then run
    `repo-intel install`. It uses uv or pipx for graphify and pnpm or npm for
-   codegraph. Missing `jq`: tell the user, since the hooks stay silent without it.
+   codegraph. It also imports this plugin's routing note into the global
+   `CLAUDE.md`; `repo-intel install claude-md` does only that step. Missing `jq`:
+   tell the user, since the build guard hook stays off without it.
 3. Backend unset: ask which backend builds the graph. Offer the providers from
    `graphify provider list`, `ollama` for a local model, `agent` to build with
    the current agent CLI (its subagents run `/graphify`; `repo-intel build` then
@@ -24,7 +26,9 @@ The CLI is `repo-intel` (on PATH while the plugin is enabled; otherwise
    and `AGENTS.md` so an agent without this plugin still uses the graphs. The
    user can remove that block later with `repo-intel instructions --remove`;
    it never deletes either file.
-5. `doctor` reported duplicate global hooks: show `repo-intel migrate-hooks`
+5. `doctor` reported the claude-md import as missing or broken: run
+   `repo-intel install claude-md`.
+6. `doctor` reported duplicate global hooks: show `repo-intel migrate-hooks`
    (a dry run), ask, then run `repo-intel migrate-hooks --apply`. It backs up
    `settings.json` first and prints the undo command.
 

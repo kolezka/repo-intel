@@ -21,5 +21,5 @@ Rules:
   questions, then read only the files it names.
 - The graphs miss things: dynamic dispatch, generated code, bodies wrapped in
   higher-order calls. A claim that something is unused or safe to change needs `rg`.
-- Stale graph (the session-start note says so): run `repo-intel build` before
+- Stale graph (`repo-intel doctor` says so): run `repo-intel build` before
   relying on it.
