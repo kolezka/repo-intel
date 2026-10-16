@@ -114,9 +114,10 @@ run_hook() { # event, json
 echo "hook"
 
 hooks_json="$here/hooks/hooks.json"
-jq -e '(.hooks | keys) == ["PreToolUse"] and (.hooks.PreToolUse | length) == 1
-  and .hooks.PreToolUse[0].matcher == "Skill|Agent|Task"' "$hooks_json" >/dev/null
-check "hooks.json registers only the build guard (no per-prompt or per-search hooks)" $? "got: $(jq -c . "$hooks_json")"
+jq -e '(.hooks | keys) == ["PreToolUse", "SessionStart"] and (.hooks.PreToolUse | length) == 1
+  and .hooks.PreToolUse[0].matcher == "Skill|Agent|Task"
+  and .hooks.PreToolUse[0].hooks == [{"type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/repo-intel-hook.sh\" pre-llm", "timeout": 3}]' "$hooks_json" >/dev/null
+check "hooks.json keeps the build guard as is and adds only the SessionStart link hook (no per-prompt or per-search hooks)" $? "got: $(jq -c . "$hooks_json")"
 
 both=$(new_repo both); mkdir -p "$both/.codegraph" "$both/graphify-out"; echo '{}' > "$both/graphify-out/graph.json"
 printf '{"llm":{"backend":"litellm"}}' > "$both/.repo-intel.json"
@@ -204,17 +205,18 @@ echo "claude-md"
 plugin_md=$(realpath "$here/claude/CLAUDE.md")
 check "the plugin ships claude/CLAUDE.md" "$([ -s "$plugin_md" ]; echo $?)" "missing $plugin_md"
 gmd="$CLAUDE_CONFIG_DIR/CLAUDE.md"
+stable="$CLAUDE_CONFIG_DIR/repo-intel/CLAUDE.md"
 count_blocks() { grep -c '^<!-- repo-intel:global:begin' "$1"; }
 
 rm -f "$gmd"
 "$cli" install claude-md >/dev/null 2>&1
 check "install claude-md creates the global CLAUDE.md with the import" \
-  "$(grep -qxF "@$plugin_md" "$gmd" 2>/dev/null && [ "$(count_blocks "$gmd")" = 1 ]; echo $?)" "got: $(cat "$gmd" 2>/dev/null)"
+  "$(grep -qxF "@$stable" "$gmd" 2>/dev/null && [ "$(count_blocks "$gmd")" = 1 ]; echo $?)" "got: $(cat "$gmd" 2>/dev/null)"
 
 printf '# Mine\nkeep me' > "$gmd"
 "$cli" install claude-md >/dev/null 2>&1
 check "install claude-md keeps existing content and appends one block" \
-  "$(head -2 "$gmd" | grep -qx 'keep me' && grep -qxF "@$plugin_md" "$gmd" && [ "$(count_blocks "$gmd")" = 1 ]; echo $?)" "got: $(cat "$gmd")"
+  "$(head -2 "$gmd" | grep -qx 'keep me' && grep -qxF "@$stable" "$gmd" && [ "$(count_blocks "$gmd")" = 1 ]; echo $?)" "got: $(cat "$gmd")"
 check "install claude-md backs up the file it changed" \
   "$(ls "$gmd".bak-repo-intel-* >/dev/null 2>&1; echo $?)" "no backup next to $gmd"
 
@@ -229,9 +231,9 @@ check "doctor flags a broken import and exits nonzero" \
   "$(echo "$out" | grep -q 'broken import' && [ $rc != 0 ]; echo $?)" "rc=$rc got: $out"
 "$cli" install claude-md >/dev/null 2>&1
 check "install claude-md repoints an old block in place" \
-  "$(grep -qxF "@$plugin_md" "$gmd" && ! grep -q '/gone/' "$gmd" && [ "$(head -1 "$gmd")" = top ] && [ "$(tail -1 "$gmd")" = bottom ] && [ "$(count_blocks "$gmd")" = 1 ]; echo $?)" "got: $(cat "$gmd")"
+  "$(grep -qxF "@$stable" "$gmd" && ! grep -q '/gone/' "$gmd" && [ "$(head -1 "$gmd")" = top ] && [ "$(tail -1 "$gmd")" = bottom ] && [ "$(count_blocks "$gmd")" = 1 ]; echo $?)" "got: $(cat "$gmd")"
 out=$("$cli" doctor 2>&1)
-check "doctor reports the import as healthy after install" "$(echo "$out" | grep -qE "claude-md +$plugin_md"; echo $?)" "got: $out"
+check "doctor reports the import as healthy after install" "$(echo "$out" | grep -qE "claude-md +$stable"; echo $?)" "got: $out"
 
 printf 'x\n<!-- repo-intel:global:begin -->\n@/a\nno end marker\n' > "$gmd"; before=$(cat "$gmd")
 "$cli" install claude-md >/dev/null 2>&1; rc=$?
@@ -241,7 +243,7 @@ check "install claude-md refuses a block with no end marker and leaves the file 
 mkdir -p "$work/dotfiles-md"; printf 'dot\n' > "$work/dotfiles-md/CLAUDE.md"; rm -f "$gmd"; ln -s "$work/dotfiles-md/CLAUDE.md" "$gmd"
 "$cli" install claude-md >/dev/null 2>&1
 check "install claude-md edits through a symlinked CLAUDE.md" \
-  "$([ -L "$gmd" ] && grep -qxF "@$plugin_md" "$work/dotfiles-md/CLAUDE.md"; echo $?)" "link: $(ls -l "$gmd")"
+  "$([ -L "$gmd" ] && grep -qxF "@$stable" "$work/dotfiles-md/CLAUDE.md"; echo $?)" "link: $(ls -l "$gmd")"
 
 # Review regressions: the global writer must never lose, expose or detach user content.
 ib='<!-- repo-intel:global:begin -->'; ie='<!-- repo-intel:global:end -->'
@@ -267,9 +269,9 @@ chmod 644 "$gmd"
 printf 'win\r\n%s\r\n@/old\r\n%s\r\n' "$ib" "$ie" > "$gmd"
 "$cli" install claude-md >/dev/null 2>&1; rc=$?
 check "install claude-md updates a CRLF block and keeps CRLF" \
-  "$([ $rc = 0 ] && grep -qF "@$plugin_md"$'\r' "$gmd" && ! grep -q '/old' "$gmd"; echo $?)" "rc=$rc got: $(od -c "$gmd" | head -5)"
+  "$([ $rc = 0 ] && grep -qF "@$stable"$'\r' "$gmd" && ! grep -q '/old' "$gmd"; echo $?)" "rc=$rc got: $(od -c "$gmd" | head -5)"
 out=$("$cli" doctor 2>&1)
-check "doctor reads a CRLF import as healthy" "$(echo "$out" | grep -qE "claude-md +$plugin_md\$"; echo $?)" "got: $out"
+check "doctor reads a CRLF import as healthy" "$(echo "$out" | grep -qE "claude-md +$stable\$"; echo $?)" "got: $out"
 
 rm -f "$gmd" "$gmd".bak-repo-intel-*; ln -s "$work/nowhere/CLAUDE.md" "$gmd"
 "$cli" install claude-md >/dev/null 2>&1; rc=$?
@@ -291,12 +293,142 @@ rm -f "$gmd" "$work/hard-claude.md"
 
 alt="$work/alt-claude"
 CLAUDE_CONFIG_DIR=$alt "$cli" install claude-md >/dev/null 2>&1
-check "install claude-md follows CLAUDE_CONFIG_DIR" "$(grep -qxF "@$plugin_md" "$alt/CLAUDE.md" 2>/dev/null; echo $?)" "nothing in $alt"
+check "install claude-md follows CLAUDE_CONFIG_DIR" "$(grep -qxF "@$alt/repo-intel/CLAUDE.md" "$alt/CLAUDE.md" 2>/dev/null; echo $?)" "nothing in $alt"
 
 rm -f "$gmd"
 PATH=$(install_path bin-uv bin-pnpm fakebin) "$cli" install >/dev/null 2>&1
-check "plain install also writes the CLAUDE.md import" "$(grep -qxF "@$plugin_md" "$gmd" 2>/dev/null; echo $?)" "got: $(cat "$gmd" 2>/dev/null)"
+check "plain install also writes the CLAUDE.md import" "$(grep -qxF "@$stable" "$gmd" 2>/dev/null; echo $?)" "got: $(cat "$gmd" 2>/dev/null)"
 rm -f "$gmd" "$work/uv.log" "$work/pnpm.log"
+
+echo "claude-md stable link"
+
+# The block imports a stable path that a symlink keeps pointed at the current plugin version.
+cfg_reset() { rm -rf "$CLAUDE_CONFIG_DIR/repo-intel" "$gmd" "$gmd".bak-repo-intel-*; }
+expect_block() { # config dir; the exact managed block install writes
+  printf '%s\n%s\n@%s/repo-intel/CLAUDE.md\n%s\n' "$ib" \
+    '<!-- Managed by `repo-intel install`; edits between these markers are overwritten. -->' "$1" "$ie"
+}
+
+cfg_reset
+"$cli" install claude-md >/dev/null 2>&1; rc=$?
+expect_block "$CLAUDE_CONFIG_DIR" > "$work/expect.md"
+check "fresh config: install creates the stable link to this plugin's CLAUDE.md" \
+  "$([ $rc = 0 ] && [ -L "$stable" ] && [ "$(readlink "$stable")" = "$plugin_md" ]; echo $?)" "rc=$rc link: $(ls -l "$stable" 2>&1)"
+check "fresh config: CLAUDE.md is exactly the managed block importing the stable path" \
+  "$(cmp -s "$work/expect.md" "$gmd"; echo $?)" "got: $(cat "$gmd" 2>/dev/null)"
+
+before_ls=$(ls -li "$stable"); before_sum=$(cksum < "$gmd")
+out=$("$cli" install claude-md 2>&1); rc=$?
+check "second install is a no-op (same link, same file, no backup)" \
+  "$([ $rc = 0 ] && [ -L "$stable" ] && [ "$(ls -li "$stable")" = "$before_ls" ] && [ "$(cksum < "$gmd")" = "$before_sum" ] && ! ls "$gmd".bak-repo-intel-* >/dev/null 2>&1; echo $?)" "rc=$rc out: $out"
+
+cfg_reset
+printf 'top\n%s\n<!-- old note -->\n@/cache/repo-intel/0.1.4/claude/CLAUDE.md\n%s\nbottom\n' "$ib" "$ie" > "$gmd"
+"$cli" install claude-md >/dev/null 2>&1; rc=$?
+{ printf 'top\n'; expect_block "$CLAUDE_CONFIG_DIR"; printf 'bottom\n'; } > "$work/expect.md"
+check "an existing block with a versioned import is migrated to the stable path" \
+  "$([ $rc = 0 ] && cmp -s "$work/expect.md" "$gmd" && [ "$(readlink "$stable")" = "$plugin_md" ]; echo $?)" "rc=$rc got: $(cat "$gmd")"
+check "migration keeps a backup of the old file" \
+  "$(grep -qF '0.1.4' "$gmd".bak-repo-intel-* 2>/dev/null; echo $?)" "backups: $(ls "$gmd".bak-repo-intel-* 2>&1)"
+
+cfg_reset
+mkdir -p "$work/plugin-old/claude" "$CLAUDE_CONFIG_DIR/repo-intel"; printf 'old\n' > "$work/plugin-old/claude/CLAUDE.md"
+ln -s "$work/plugin-old/claude/CLAUDE.md" "$stable"
+"$cli" install claude-md >/dev/null 2>&1; rc=$?
+check "install repoints a link to another plugin copy" \
+  "$([ $rc = 0 ] && [ "$(readlink "$stable")" = "$plugin_md" ] && [ "$(cat "$work/plugin-old/claude/CLAUDE.md")" = old ]; echo $?)" "rc=$rc link: $(ls -l "$stable")"
+
+cfg_reset; mkdir -p "$CLAUDE_CONFIG_DIR/repo-intel"; ln -s "$work/gone/claude/CLAUDE.md" "$stable"
+out=$("$cli" doctor 2>&1); rc=$?
+check "doctor reports a dangling stable link and exits nonzero" \
+  "$(echo "$out" | grep -qE '^  claude-md-link +dangling' && [ $rc != 0 ]; echo $?)" "rc=$rc got: $out"
+"$cli" install claude-md >/dev/null 2>&1; rc=$?
+check "install repoints a dangling link" \
+  "$([ $rc = 0 ] && [ "$(readlink "$stable")" = "$plugin_md" ]; echo $?)" "rc=$rc link: $(ls -l "$stable")"
+
+cfg_reset; mkdir -p "$CLAUDE_CONFIG_DIR/repo-intel"; printf 'hand-written\n' > "$stable"; printf 'mine\n' > "$gmd"
+out=$("$cli" install claude-md 2>&1); rc=$?
+check "install refuses a regular file at the stable link path, nonzero exit" \
+  "$([ $rc != 0 ] && echo "$out" | grep -q 'not a symlink'; echo $?)" "rc=$rc out: $out"
+check "the refused install changes nothing (file, CLAUDE.md, no backup)" \
+  "$([ ! -L "$stable" ] && [ "$(cat "$stable")" = hand-written ] && [ "$(cat "$gmd")" = mine ] && ! ls "$gmd".bak-repo-intel-* >/dev/null 2>&1; echo $?)" "stable: $(ls -l "$stable") gmd: $(cat "$gmd")"
+out=$("$cli" doctor 2>&1); rc=$?
+check "doctor reports a regular file at the stable link path and exits nonzero" \
+  "$(echo "$out" | grep -qE '^  claude-md-link +regular file' && [ $rc != 0 ]; echo $?)" "rc=$rc got: $out"
+
+cfg_reset; mkdir -p "$CLAUDE_CONFIG_DIR/repo-intel"; ln -s "$work/plugin-old/claude/CLAUDE.md" "$stable"
+out=$("$cli" doctor 2>&1)
+check "doctor reports a link that points elsewhere" \
+  "$(echo "$out" | grep -qE '^  claude-md-link +points elsewhere'; echo $?)" "got: $out"
+cfg_reset; "$cli" install claude-md >/dev/null 2>&1; out=$("$cli" doctor 2>&1)
+check "doctor reports the stable link as ok after install" \
+  "$(echo "$out" | grep -qE "^  claude-md-link +ok "; echo $?)" "got: $out"
+cfg_reset; printf '%s\n@%s\n%s\n' "$ib" "$plugin_md" "$ie" > "$gmd"
+out=$("$cli" doctor 2>&1)
+check "doctor flags a block that still imports a versioned path" \
+  "$(echo "$out" | grep -qE '^  claude-md +versioned import'; echo $?)" "got: $out"
+
+# Content outside the managed block is preserved byte for byte.
+cfg_reset
+printf '@%s/other-rules.md\n%s\n@/cache/repo-intel/0.1.3/claude/CLAUDE.md\n%s\n' "$work" "$ib" "$ie" > "$gmd"
+"$cli" install claude-md >/dev/null 2>&1; rc=$?
+{ printf '@%s/other-rules.md\n' "$work"; expect_block "$CLAUDE_CONFIG_DIR"; } > "$work/expect.md"
+check "a single @import line followed by the block keeps that line byte for byte" \
+  "$([ $rc = 0 ] && cmp -s "$work/expect.md" "$gmd"; echo $?)" "rc=$rc got: $(od -c "$gmd" | head -8)"
+cfg_reset
+printf '# Rules\t \n\n  keep  spaces  \n%s\n@/v/0.1.2/claude/CLAUDE.md\n%s\n\nafter\nno final newline' "$ib" "$ie" > "$gmd"
+"$cli" install claude-md >/dev/null 2>&1; rc=$?
+{ printf '# Rules\t \n\n  keep  spaces  \n'; expect_block "$CLAUDE_CONFIG_DIR"; printf '\nafter\nno final newline'; } > "$work/expect.md"
+check "content before and after the block is preserved byte for byte" \
+  "$([ $rc = 0 ] && cmp -s "$work/expect.md" "$gmd"; echo $?)" "rc=$rc got: $(od -c "$gmd" | tail -5)"
+cfg_reset
+
+echo "session-start link hook"
+
+link_hook="$here/hooks/repo-intel-link.sh"
+hooks_session=$(jq -c '.hooks.SessionStart // []' "$hooks_json")
+echo "$hooks_session" | jq -e 'length == 1 and (.[0].hooks | length) == 1
+  and .[0].hooks[0].timeout == 5
+  and .[0].hooks[0].command == "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/repo-intel-link.sh\""' >/dev/null 2>&1
+check "hooks.json registers one SessionStart hook running the link script (timeout 5)" $? "got: $hooks_session"
+
+run_link_hook() { # plugin root (empty = unset); prints output, returns the hook's exit code
+  # Unset runs from a dir that looks like a plugin root, so a hook falling back to $PWD would show.
+  if [ -n "$1" ]; then CLAUDE_PLUGIN_ROOT=$1 sh "$link_hook" </dev/null 2>&1
+  else (unset CLAUDE_PLUGIN_ROOT; cd "$work/plugin-new" && sh "$link_hook" </dev/null 2>&1); fi
+}
+mkdir -p "$work/plugin-new/claude"; printf 'new\n' > "$work/plugin-new/claude/CLAUDE.md"
+new_md="$(cd "$work/plugin-new" && pwd -P)/claude/CLAUDE.md"  # the hook writes the physical path
+
+cfg_reset; mkdir -p "$CLAUDE_CONFIG_DIR/repo-intel"; ln -s "$work/plugin-old/claude/CLAUDE.md" "$stable"
+out=$(run_link_hook "$work/plugin-new"); rc=$?
+check "hook repoints an existing link to the current plugin, silently, exit 0" \
+  "$([ $rc = 0 ] && [ -z "$out" ] && [ "$(readlink "$stable")" = "$new_md" ]; echo $?)" "rc=$rc out: $out link: $(ls -l "$stable")"
+
+cfg_reset; mkdir -p "$CLAUDE_CONFIG_DIR/repo-intel"; ln -s "$work/gone/claude/CLAUDE.md" "$stable"
+out=$(run_link_hook "$work/plugin-new"); rc=$?
+check "hook repoints a dangling link" \
+  "$([ $rc = 0 ] && [ -z "$out" ] && [ "$(readlink "$stable")" = "$new_md" ]; echo $?)" "rc=$rc out: $out"
+
+cfg_reset
+out=$(run_link_hook "$work/plugin-new"); rc=$?
+check "hook creates nothing when there is no link" \
+  "$([ $rc = 0 ] && [ -z "$out" ] && [ ! -e "$stable" ] && [ ! -L "$stable" ] && [ ! -e "$CLAUDE_CONFIG_DIR/repo-intel" ]; echo $?)" "rc=$rc out: $out"
+
+cfg_reset; mkdir -p "$CLAUDE_CONFIG_DIR/repo-intel"; printf 'hand-written\n' > "$stable"
+out=$(run_link_hook "$work/plugin-new"); rc=$?
+check "hook leaves a regular file alone" \
+  "$([ $rc = 0 ] && [ -z "$out" ] && [ ! -L "$stable" ] && [ "$(cat "$stable")" = hand-written ]; echo $?)" "rc=$rc out: $out"
+
+cfg_reset; mkdir -p "$CLAUDE_CONFIG_DIR/repo-intel"; ln -s "$work/plugin-old/claude/CLAUDE.md" "$stable"
+out=$(run_link_hook ""); rc=$?
+check "hook is a no-op without CLAUDE_PLUGIN_ROOT" \
+  "$([ $rc = 0 ] && [ -z "$out" ] && [ "$(readlink "$stable")" = "$work/plugin-old/claude/CLAUDE.md" ]; echo $?)" "rc=$rc out: $out"
+mkdir -p "$work/empty-plugin/claude"
+out=$(run_link_hook "$work/empty-plugin"); rc=$?
+check "hook never points the link at a plugin root with no claude/CLAUDE.md" \
+  "$([ $rc = 0 ] && [ -z "$out" ] && [ "$(readlink "$stable")" = "$work/plugin-old/claude/CLAUDE.md" ]; echo $?)" "rc=$rc out: $out"
+cfg_reset
 
 echo "cli"
 

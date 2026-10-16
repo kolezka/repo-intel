@@ -7,6 +7,13 @@
           { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/repo-intel-hook.sh\" pre-llm", "timeout": 3 }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/repo-intel-link.sh\"", "timeout": 5 }
+        ]
+      }
     ]
   }
 }
