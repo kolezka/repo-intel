@@ -1,6 +1,6 @@
 {
   "name": "repo-intel",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Installs codegraph and graphify in a repository, keeps both graphs fresh, routes the agent to the right one through a CLAUDE.md import, and runs graphify's semantic extraction on a configured LLM backend (LiteLLM, Ollama, OpenAI-compatible) instead of agent subagents.",
   "author": {
     "name": "Mariusz Rakus"

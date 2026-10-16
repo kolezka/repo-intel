@@ -32,18 +32,24 @@ Requirements: `git`, `jq`, and `uv`/`pipx` plus `pnpm`/`npm` for the installs.
 
 Routing lives in [`claude/CLAUDE.md`](claude/CLAUDE.md): codegraph for structure, graphify
 for concepts, rg for literal text and complete call-site lists. `repo-intel install` (or
-`repo-intel install claude-md` alone) adds a managed block to
-`${CLAUDE_CONFIG_DIR:-~/.claude}/CLAUDE.md` that imports it with `@<path>`. Re-running
-replaces the block in place, backs up the file first, and edits through a symlink.
+`repo-intel install claude-md` alone) links `${CLAUDE_CONFIG_DIR:-~/.claude}/repo-intel/CLAUDE.md`
+to the installed plugin's copy and adds a managed block to
+`${CLAUDE_CONFIG_DIR:-~/.claude}/CLAUDE.md` that imports that link with `@<path>`. Re-running
+replaces the block in place, backs up the file first, and edits through a symlink. A block
+written by an older version, importing a versioned cache path, is rewritten to the link. If
+a regular file sits where the link goes, `install` stops and changes nothing.
 
-The import points at the installed plugin version. After a plugin update the old
-directory can disappear and the import breaks without a message. `repo-intel doctor`
-reports that, and `repo-intel install claude-md` fixes it.
+The link path has no version in it, so the import survives plugin updates. A SessionStart
+hook repoints an existing link at the new version; it never creates one. Claude Code loads
+memory before SessionStart hooks run, so the first session after an update may still read
+the previous version's file (or nothing, if that directory is gone), and the next one reads
+the new one. `repo-intel doctor` reports the link (ok, dangling, points elsewhere, or a
+regular file) and whether the block imports it.
 
 `repo-intel doctor` also reports a graphify graph as stale when docs changed since the
 last `repo-intel build` (graphify's own git hook keeps code current).
 
-One hook remains, a guard on PreToolUse Skill, Agent and Task. With a backend configured
+Besides that link hook, there is a guard on PreToolUse Skill, Agent and Task. With a backend configured
 it denies `/graphify` builds and graphify extraction subagents (also in a repo with no
 graph yet) and points to `repo-intel build`. `/graphify query`, `path` and `explain` stay
 allowed. `repo-intel config --backend agent` turns the guard off. It costs one `sh` and

@@ -11,7 +11,8 @@ Usage: repo-intel <command> [options]
   install [graphify|codegraph|claude-md|all]
                              Install or upgrade to latest (graphify via uv/pipx, codegraph via pnpm/npm),
                              and reference this plugin's CLAUDE.md from the global one
-                             (${CLAUDE_CONFIG_DIR:-~/.claude}/CLAUDE.md)
+                             (${CLAUDE_CONFIG_DIR:-~/.claude}/CLAUDE.md) through a version-free
+                             link at ${CLAUDE_CONFIG_DIR:-~/.claude}/repo-intel/CLAUDE.md
   setup                      In the current git repo: index codegraph, add .gitignore
                              entries, install graphify git hooks, then build
   config [--global] --backend B [--model M] [--base-url URL]
@@ -42,6 +43,12 @@ repo_root() { git rev-parse --show-toplevel 2>/dev/null || die "not inside a git
 user_config() { printf '%s/repo-intel/config.json' "${XDG_CONFIG_HOME:-$HOME/.config}"; }
 settings_file() { printf '%s/settings.json' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; }
 global_claude_md() { printf '%s/CLAUDE.md' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; }
+# Version-free path the global block imports; a symlink to this plugin's claude/CLAUDE.md.
+stable_claude_md() {
+  local dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  [[ $dir == /* ]] || dir="$PWD/$dir"
+  printf '%s/repo-intel/CLAUDE.md' "$dir"
+}
 plugin_root=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
 plugin_claude_md="$plugin_root/claude/CLAUDE.md"
 
@@ -71,7 +78,7 @@ resolve_llm() {
 replaced_hooks='(^|[/[:space:]])graphify hook-guard|(^|[/[:space:]])codegraph prompt-hook'
 
 cmd_doctor() {
-  local ok=0 root settings dup t imported
+  local ok=0 root settings dup t imported stable link_target
   for t in jq git graphify codegraph; do
     if have "$t"; then
       printf '  %-15s %s\n' "$t" "$("$t" --version 2>/dev/null | head -1)"
@@ -100,17 +107,32 @@ cmd_doctor() {
       | select(test($re))] | unique | join(", ")' "$settings")
     [[ -n $dup ]] && printf '  %-15s duplicate global hooks: %s (run: repo-intel migrate-hooks)\n' hooks "$dup"
   fi
+  stable=$(stable_claude_md)
   if ! imported=$(claude_md_import "$(global_claude_md)"); then
     printf '  %-15s malformed repo-intel:global block in %s (fix it by hand)\n' claude-md "$(global_claude_md)"; ok=1
   elif [[ -z $imported ]]; then
     printf '  %-15s not referenced from %s (run: repo-intel install claude-md)\n' claude-md "$(global_claude_md)"
+  elif [[ $imported == "$stable" ]]; then
+    printf '  %-15s %s\n' claude-md "$imported"
   elif [[ ! -f $imported ]]; then
     # A plugin update removes the old version's directory, which silently drops the import.
     printf '  %-15s broken import, %s is gone (run: repo-intel install claude-md)\n' claude-md "$imported"; ok=1
-  elif [[ $imported != "$plugin_claude_md" ]]; then
-    printf '  %-15s imports another copy: %s (run: repo-intel install claude-md)\n' claude-md "$imported"
   else
-    printf '  %-15s %s\n' claude-md "$imported"
+    printf '  %-15s versioned import %s, breaks on the next plugin update (run: repo-intel install claude-md)\n' claude-md "$imported"
+  fi
+  if [[ -L $stable ]]; then
+    link_target=$(readlink "$stable")
+    if [[ ! -e $stable ]]; then
+      printf '  %-15s dangling: %s -> %s (run: repo-intel install claude-md)\n' claude-md-link "$stable" "$link_target"; ok=1
+    elif [[ $link_target != "$plugin_claude_md" ]]; then
+      printf '  %-15s points elsewhere: %s -> %s (run: repo-intel install claude-md)\n' claude-md-link "$stable" "$link_target"
+    else
+      printf '  %-15s ok %s -> %s\n' claude-md-link "$stable" "$link_target"
+    fi
+  elif [[ -e $stable ]]; then
+    printf '  %-15s regular file at %s, not a symlink (move it away, then run: repo-intel install claude-md)\n' claude-md-link "$stable"; ok=1
+  else
+    printf '  %-15s missing %s (run: repo-intel install claude-md)\n' claude-md-link "$stable"
   fi
   return $ok
 }
@@ -142,10 +164,13 @@ claude_md_import() {
   sed -n "${LOC_BEGIN},${LOC_END}s/^@//p" "$1" | tr -d '\r' | head -1
 }
 
-# The import points at this plugin version's copy, so a plugin update needs a re-run
-# (doctor reports a broken import).
+# The block imports a version-free symlink rather than this plugin version's copy, so a
+# plugin update only needs the link repointed (the SessionStart hook does that).
 install_claude_md() {
-  local instr_begin=$claude_md_begin instr_end=$claude_md_end target backup="" block
+  local instr_begin=$claude_md_begin instr_end=$claude_md_end target backup="" block stable
+  stable=$(stable_claude_md)
+  # Checked before anything is written, so a refusal changes nothing.
+  [[ -e $stable && ! -L $stable ]] && die "$stable exists and is not a symlink; move it away, then re-run"
   target=$(global_claude_md)
   mkdir -p "$(dirname "$target")"
   [[ -L $target && ! -e $target ]] && die "$target is a dangling symlink; fix the link first"
@@ -154,7 +179,13 @@ install_claude_md() {
   instructions_check_target "$target"
   instructions_locate "$target"
   [[ $LOC_OK == 1 ]] || die "$target: $LOC_REASON; fix it by hand"
-  block="$claude_md_begin"$'\n'"<!-- Managed by \`repo-intel install\`; edits between these markers are overwritten. -->"$'\n'"@$plugin_claude_md"$'\n'"$claude_md_end"
+  block="$claude_md_begin"$'\n'"<!-- Managed by \`repo-intel install\`; edits between these markers are overwritten. -->"$'\n'"@$stable"$'\n'"$claude_md_end"
+  if [[ ! -L $stable || $(readlink "$stable") != "$plugin_claude_md" ]]; then
+    mkdir -p "$(dirname "$stable")" || die "could not create $(dirname "$stable")"
+    # -n replaces a link to a directory instead of writing inside it.
+    ln -sfn "$plugin_claude_md" "$stable" || die "could not link $stable to $plugin_claude_md"
+    info "$stable now links to $plugin_claude_md"
+  fi
   if [[ -f $target ]]; then
     # mktemp keeps backups unique even for two installs in the same second.
     backup=$(mktemp "$target.bak-repo-intel-$(date +%Y%m%d%H%M%S).XXXXXX") || die "could not create a backup next to $target"
@@ -163,9 +194,9 @@ install_claude_md() {
   instructions_apply "$target" "$block" ""
   if [[ $ISTATUS == unchanged ]]; then
     [[ -n $backup ]] && rm -f "$backup"
-    info "$target already imports $plugin_claude_md"; return 0
+    info "$target already imports $stable"; return 0
   fi
-  info "$target now imports $plugin_claude_md${backup:+; backup at $backup (undo: cp \"$backup\" \"$target\")}"
+  info "$target now imports $stable${backup:+; backup at $backup (undo: cp \"$backup\" \"$target\")}"
 }
 
 cmd_install() {

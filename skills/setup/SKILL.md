@@ -26,8 +26,9 @@ The CLI is `repo-intel` (on PATH while the plugin is enabled; otherwise
    and `AGENTS.md` so an agent without this plugin still uses the graphs. The
    user can remove that block later with `repo-intel instructions --remove`;
    it never deletes either file.
-5. `doctor` reported the claude-md import as missing or broken: run
-   `repo-intel install claude-md`.
+5. `doctor` reported the claude-md import or claude-md-link as anything but
+   healthy: run `repo-intel install claude-md`. If it reports a regular file at
+   the link path, ask the user before moving that file away.
 6. `doctor` reported duplicate global hooks: show `repo-intel migrate-hooks`
    (a dry run), ask, then run `repo-intel migrate-hooks --apply`. It backs up
    `settings.json` first and prints the undo command.
