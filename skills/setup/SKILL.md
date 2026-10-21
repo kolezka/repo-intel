@@ -22,8 +22,9 @@ The CLI is `repo-intel` (on PATH while the plugin is enabled; otherwise
    and never go in the config file.
 4. `repo-intel setup`. It indexes codegraph, adds `.codegraph/` and
    `graphify-out/cache/` to `.gitignore`, installs graphify's git hooks, runs
-   the first build, then writes a short "Code graphs" block into `CLAUDE.md`
-   and `AGENTS.md` so an agent without this plugin still uses the graphs. The
+   the first build, then writes a short "Code graphs" block into `AGENTS.md`
+   (imported from `CLAUDE.md` with `@AGENTS.md`, not repeated there) so an
+   agent without this plugin still uses the graphs. The
    user can remove that block later with `repo-intel instructions --remove`;
    it never deletes either file.
 5. `doctor` reported the claude-md import or claude-md-link as anything but

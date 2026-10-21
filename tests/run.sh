@@ -702,38 +702,44 @@ grep -qF '<!-- repo-intel:begin -->' "$r/CLAUDE.md" && grep -qF '<!-- repo-intel
 check "codegraph-only: CLAUDE.md gets the managed block" $? "got: $(cat "$r/CLAUDE.md" 2>/dev/null)"
 grep -qF '<!-- repo-intel:begin -->' "$r/AGENTS.md"
 check "codegraph-only: AGENTS.md gets the managed block too" $? "got: $(cat "$r/AGENTS.md" 2>/dev/null)"
-grep -q 'codegraph_explore' "$r/CLAUDE.md"
-check "codegraph-only: codegraph section is present" $? "got: $(cat "$r/CLAUDE.md")"
-grep -q 'graphify query' "$r/CLAUDE.md"
+grep -q 'codegraph_explore' "$r/AGENTS.md"
+check "codegraph-only: codegraph section is present" $? "got: $(cat "$r/AGENTS.md")"
+grep -q 'graphify query' "$r/AGENTS.md"
 check "codegraph-only: graphify section is absent" "$([ $? != 0 ]; echo $?)" "graphify section should not be there"
+printf '%s\n@AGENTS.md\n%s\n' '<!-- repo-intel:begin -->' '<!-- repo-intel:end -->' > "$work/instr-cg-claude-want"
+cmp -s "$r/CLAUDE.md" "$work/instr-cg-claude-want"
+check "separate files: CLAUDE.md's block only imports AGENTS.md, no duplicated note" $? "got: $(cat "$r/CLAUDE.md")"
 
 r=$(new_repo instr-both); mkdir -p "$r/.codegraph" "$r/graphify-out"; echo '{}' > "$r/graphify-out/graph.json"
 (cd "$r" && "$cli" instructions >/dev/null 2>&1)
-grep -q 'codegraph_explore' "$r/CLAUDE.md"
-check "both graphs: codegraph section is present" $? "got: $(cat "$r/CLAUDE.md")"
-grep -q 'graphify query' "$r/CLAUDE.md"
-check "both graphs: graphify section is present" $? "got: $(cat "$r/CLAUDE.md")"
+grep -q 'codegraph_explore' "$r/AGENTS.md"
+check "both graphs: codegraph section is present" $? "got: $(cat "$r/AGENTS.md")"
+grep -q 'graphify query' "$r/AGENTS.md"
+check "both graphs: graphify section is present" $? "got: $(cat "$r/AGENTS.md")"
+grep -q 'graphify query\|codegraph_explore' "$r/CLAUDE.md"
+check "both graphs: CLAUDE.md does not repeat the note" "$([ $? != 0 ]; echo $?)" "got: $(cat "$r/CLAUDE.md")"
 
 cp "$r/CLAUDE.md" "$work/instr-both-claude-before"
+cp "$r/AGENTS.md" "$work/instr-both-agents-before"
 out=$(cd "$r" && "$cli" instructions 2>&1)
 check "rerun with no change in graph presence reports unchanged" \
   "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: unchanged' && echo "$out" | grep -qx 'repo-intel: AGENTS.md: unchanged'; echo $?)" "got: $out"
-cmp -s "$r/CLAUDE.md" "$work/instr-both-claude-before"
+cmp -s "$r/CLAUDE.md" "$work/instr-both-claude-before" && cmp -s "$r/AGENTS.md" "$work/instr-both-agents-before"
 check "rerun with no change leaves file content identical" $? "content changed"
 
 r=$(new_repo instr-update); mkdir -p "$r/.codegraph"
-printf 'BEFORE line\n' > "$r/CLAUDE.md"
+printf 'BEFORE line\n' > "$r/AGENTS.md"
 (cd "$r" && "$cli" instructions >/dev/null 2>&1)
-printf '%s\nAFTER line\n' "$(cat "$r/CLAUDE.md")" > "$r/CLAUDE.md"
+printf '%s\nAFTER line\n' "$(cat "$r/AGENTS.md")" > "$r/AGENTS.md"
 mkdir -p "$r/graphify-out"; echo '{}' > "$r/graphify-out/graph.json"
 out=$(cd "$r" && "$cli" instructions 2>&1)
-check "adding a second graph updates the block" "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: updated'; echo $?)" "got: $out"
-grep -qxF 'BEFORE line' "$r/CLAUDE.md"
-check "update preserves content before the block" $? "got: $(cat "$r/CLAUDE.md")"
-grep -qxF 'AFTER line' "$r/CLAUDE.md"
-check "update preserves content after the block" $? "got: $(cat "$r/CLAUDE.md")"
-grep -q 'graphify query' "$r/CLAUDE.md"
-check "update adds the newly available graphify section" $? "got: $(cat "$r/CLAUDE.md")"
+check "adding a second graph updates the block" "$(echo "$out" | grep -qx 'repo-intel: AGENTS.md: updated'; echo $?)" "got: $out"
+grep -qxF 'BEFORE line' "$r/AGENTS.md"
+check "update preserves content before the block" $? "got: $(cat "$r/AGENTS.md")"
+grep -qxF 'AFTER line' "$r/AGENTS.md"
+check "update preserves content after the block" $? "got: $(cat "$r/AGENTS.md")"
+grep -q 'graphify query' "$r/AGENTS.md"
+check "update adds the newly available graphify section" $? "got: $(cat "$r/AGENTS.md")"
 
 r=$(new_repo instr-nograph)
 out=$(cd "$r" && "$cli" instructions 2>&1)
@@ -749,6 +755,49 @@ check "symlinked CLAUDE.md -> AGENTS.md: one shared info line" \
 check "symlinked CLAUDE.md -> AGENTS.md: CLAUDE.md stays a symlink" "$([ -L "$r/CLAUDE.md" ]; echo $?)" "symlink replaced by a regular file"
 grep -qF 'shared notes' "$r/AGENTS.md" && grep -qF '<!-- repo-intel:begin -->' "$r/AGENTS.md"
 check "symlinked CLAUDE.md -> AGENTS.md: the shared file has both the old content and the block" $? "got: $(cat "$r/AGENTS.md")"
+grep -q 'codegraph_explore' "$r/AGENTS.md" && ! grep -qxF '@AGENTS.md' "$r/AGENTS.md"
+check "symlinked CLAUDE.md -> AGENTS.md: the shared file gets the full note, not a self-import" $? "got: $(cat "$r/AGENTS.md")"
+
+echo "instructions: CLAUDE.md imports AGENTS.md"
+
+r=$(new_repo instr-migrate); mkdir -p "$r/.codegraph"
+printf 'mine\n\n%s\n## Code graphs\n\nold full note\n%s\n' '<!-- repo-intel:begin -->' '<!-- repo-intel:end -->' > "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "an old full block in CLAUDE.md is replaced by the import" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: updated'; echo $?)" "got: $out"
+printf 'mine\n\n%s\n@AGENTS.md\n%s\n' '<!-- repo-intel:begin -->' '<!-- repo-intel:end -->' > "$work/instr-migrate-want"
+cmp -s "$r/CLAUDE.md" "$work/instr-migrate-want"
+check "migrated CLAUDE.md keeps its own content and holds only the import" $? "got: $(cat "$r/CLAUDE.md")"
+
+r=$(new_repo instr-own-import); mkdir -p "$r/.codegraph"
+printf '@AGENTS.md\n\nmore notes\n' > "$r/CLAUDE.md"
+cp "$r/CLAUDE.md" "$work/instr-own-import.orig"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "CLAUDE.md that already imports AGENTS.md: reported, not given a block" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: unchanged (already imports AGENTS.md)'; echo $?)" "got: $out"
+cmp -s "$r/CLAUDE.md" "$work/instr-own-import.orig"
+check "CLAUDE.md that already imports AGENTS.md: left byte for byte untouched" $? "got: $(cat "$r/CLAUDE.md")"
+grep -qF '<!-- repo-intel:begin -->' "$r/AGENTS.md"
+check "CLAUDE.md that already imports AGENTS.md: AGENTS.md still gets the note" $? "got: $(cat "$r/AGENTS.md" 2>/dev/null)"
+out=$(cd "$r" && "$cli" doctor 2>&1)
+echo "$out" | grep -qE '^  instructions +present$'
+check "doctor counts a hand-written @AGENTS.md import as present" $? "got: $out"
+
+r=$(new_repo instr-own-import-old-block); mkdir -p "$r/.codegraph"
+printf '@./AGENTS.md\n' > "$r/CLAUDE.md"
+cp "$r/CLAUDE.md" "$work/instr-own-import-old-block.orig"
+printf '\n%s\nold full note\n%s\n' '<!-- repo-intel:begin -->' '<!-- repo-intel:end -->' >> "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "a hand-written import plus an old block: the now redundant block is removed" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: removed (already imports AGENTS.md)'; echo $?)" "got: $out"
+cmp -s "$r/CLAUDE.md" "$work/instr-own-import-old-block.orig"
+check "a hand-written import plus an old block: only the import is left" $? "got: $(cat "$r/CLAUDE.md")"
+
+r=$(new_repo instr-fenced-import); mkdir -p "$r/.codegraph"
+printf 'Example:\n\n```\n@AGENTS.md\n```\n' > "$r/CLAUDE.md"
+out=$(cd "$r" && "$cli" instructions 2>&1)
+check "an @AGENTS.md line inside a code fence is not taken as an import" \
+  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: added'; echo $?)" "got: $out"
 
 r=$(new_repo instr-remove); mkdir -p "$r/.codegraph"
 printf 'My own CLAUDE.md notes.\n\nSecond paragraph.\n' > "$r/CLAUDE.md"
@@ -792,23 +841,23 @@ echo "instructions: CRLF files"
 
 r=$(new_repo instr-crlf); mkdir -p "$r/.codegraph"
 (cd "$r" && "$cli" instructions >/dev/null 2>&1)
-awk '{printf "%s\r\n", $0}' "$r/CLAUDE.md" > "$r/CLAUDE.md.crlf" && mv "$r/CLAUDE.md.crlf" "$r/CLAUDE.md"
+awk '{printf "%s\r\n", $0}' "$r/AGENTS.md" > "$r/AGENTS.md.crlf" && mv "$r/AGENTS.md.crlf" "$r/AGENTS.md"
 out=$(cd "$r" && "$cli" instructions 2>&1)
 check "a CRLF-converted file: rerun recognises the existing block instead of duplicating it" \
-  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: unchanged'; echo $?)" "got: $out"
-begins=$(grep -cF '<!-- repo-intel:begin -->' "$r/CLAUDE.md")
+  "$(echo "$out" | grep -qx 'repo-intel: AGENTS.md: unchanged'; echo $?)" "got: $out"
+begins=$(grep -cF '<!-- repo-intel:begin -->' "$r/AGENTS.md")
 check "a CRLF-converted file: still has exactly one begin marker" "$([ "$begins" = 1 ]; echo $?)" "got $begins begin markers"
 
 r=$(new_repo instr-crlf-update); mkdir -p "$r/.codegraph"
 (cd "$r" && "$cli" instructions >/dev/null 2>&1)
-awk '{printf "%s\r\n", $0}' "$r/CLAUDE.md" > "$r/CLAUDE.md.crlf" && mv "$r/CLAUDE.md.crlf" "$r/CLAUDE.md"
+awk '{printf "%s\r\n", $0}' "$r/AGENTS.md" > "$r/AGENTS.md.crlf" && mv "$r/AGENTS.md.crlf" "$r/AGENTS.md"
 mkdir -p "$r/graphify-out"; echo '{}' > "$r/graphify-out/graph.json"
 out=$(cd "$r" && "$cli" instructions 2>&1)
 check "a CRLF-converted file: adding a second graph updates, not duplicates, the block" \
-  "$(echo "$out" | grep -qx 'repo-intel: CLAUDE.md: updated'; echo $?)" "got: $out"
-begins=$(grep -cF '<!-- repo-intel:begin -->' "$r/CLAUDE.md")
+  "$(echo "$out" | grep -qx 'repo-intel: AGENTS.md: updated'; echo $?)" "got: $out"
+begins=$(grep -cF '<!-- repo-intel:begin -->' "$r/AGENTS.md")
 check "a CRLF-converted file: update still leaves exactly one begin marker" "$([ "$begins" = 1 ]; echo $?)" "got $begins begin markers"
-line=$(grep -F 'Refresh when stale' "$r/CLAUDE.md")
+line=$(grep -F 'Refresh when stale' "$r/AGENTS.md")
 check "a CRLF-converted file: the rewritten block keeps CRLF line endings" "$([[ $line == *$'\r' ]]; echo $?)" "got line without trailing CR: $(printf '%s' "$line" | od -c | head -3)"
 
 echo "instructions: --remove symmetry"
@@ -1035,9 +1084,9 @@ check "a failing read of the temp file: no stray temp file is left behind" "$([ 
 # into the candidate, rather than just an optional CRLF probe that fails
 # open and harmlessly falls back to "no CRLF" without aborting anything.
 r=$(new_repo instr-atomic-build-failure); mkdir -p "$r/.codegraph"
-printf 'ORIGINAL CONTENT, MUST SURVIVE A FAILED BUILD\n' > "$r/CLAUDE.md"
+printf 'ORIGINAL CONTENT, MUST SURVIVE A FAILED BUILD\n' > "$r/AGENTS.md"
 (cd "$r" && "$cli" instructions >/dev/null 2>&1)
-cp "$r/CLAUDE.md" "$work/instr-atomic-build-failure.orig"
+cp "$r/AGENTS.md" "$work/instr-atomic-build-failure.orig"
 mkdir -p "$r/graphify-out"; echo '{}' > "$r/graphify-out/graph.json"
 mkdir -p "$work/failsed"
 cat > "$work/failsed/sed" <<'FAKESED'
@@ -1048,18 +1097,18 @@ chmod +x "$work/failsed/sed"
 out=$(cd "$r" && PATH="$work/failsed:$PATH" "$cli" instructions 2>&1); rc=$?
 check "a failing tool while building the candidate makes instructions exit nonzero" \
   "$([ "$rc" -ne 0 ]; echo $?)" "exit code was $rc; output: $out"
-cmp -s "$r/CLAUDE.md" "$work/instr-atomic-build-failure.orig"
+cmp -s "$r/AGENTS.md" "$work/instr-atomic-build-failure.orig"
 check "a failing tool while building the candidate: the original (pre-update) file is byte-for-byte untouched" $? \
-  "got: $(cat "$r/CLAUDE.md" 2>/dev/null)"
+  "got: $(cat "$r/AGENTS.md" 2>/dev/null)"
 
 r=$(new_repo instr-atomic-mode); mkdir -p "$r/.codegraph"
-printf 'notes\n' > "$r/CLAUDE.md"
-chmod 640 "$r/CLAUDE.md"
+printf 'notes\n' > "$r/AGENTS.md"
+chmod 640 "$r/AGENTS.md"
 (cd "$r" && "$cli" instructions >/dev/null 2>&1)
-mode1=$(/bin/ls -l "$r/CLAUDE.md" | awk '{print $1}')
+mode1=$(/bin/ls -l "$r/AGENTS.md" | awk '{print $1}')
 mkdir -p "$r/graphify-out"; echo '{}' > "$r/graphify-out/graph.json"
 (cd "$r" && "$cli" instructions >/dev/null 2>&1)
-mode2=$(/bin/ls -l "$r/CLAUDE.md" | awk '{print $1}')
+mode2=$(/bin/ls -l "$r/AGENTS.md" | awk '{print $1}')
 check "file mode (640) is preserved across add" "$([ "$mode1" = "-rw-r-----@" ] || [ "$mode1" = "-rw-r-----" ]; echo $?)" "got: $mode1"
 check "file mode (640) is preserved across update" "$([ "$mode2" = "-rw-r-----@" ] || [ "$mode2" = "-rw-r-----" ]; echo $?)" "got: $mode2"
 
