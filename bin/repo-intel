@@ -25,9 +25,10 @@ Usage: repo-intel <command> [options]
                              Refresh codegraph and graphify using the configured backend.
                              --strict fails the build if graphify could not fully parse
                              every file (see the partial-parse warning)
-  instructions [--remove]    Write (or remove) a short managed block in CLAUDE.md
-                             and AGENTS.md pointing any agent, with or without this
-                             plugin, at codegraph/graphify. Needs .codegraph/ and/or
+  instructions [--remove]    Write (or remove) a short managed block in AGENTS.md
+                             pointing any agent, with or without this plugin, at
+                             codegraph/graphify, and an `@AGENTS.md` import of it in
+                             CLAUDE.md. Needs .codegraph/ and/or
                              graphify-out/graph.json to already exist
   migrate-hooks [--apply]    Remove the global `graphify hook-guard` and
                              `codegraph prompt-hook` entries this plugin replaces
@@ -445,6 +446,12 @@ instructions_block() { # has_codegraph(0/1) has_graphify(0/1)
   printf '%s\n' "$instr_end"
 }
 
+# CLAUDE.md's block when AGENTS.md is a separate file: Claude Code reads
+# `@path` lines as imports, so the note lives once, in AGENTS.md.
+instructions_import_block() {
+  printf '%s\n@AGENTS.md\n%s' "$instr_begin" "$instr_end"
+}
+
 # Resolves $2 (CLAUDE.md or AGENTS.md under repo root $1, itself already
 # realpath'd) through any symlink. Sets INSTR_TARGET to the real path to
 # read/write (or the plain path if nothing exists yet there), and
@@ -522,11 +529,13 @@ instructions_check_target() {
 # text besides whitespace and at least as many fence characters as the
 # opener). Sets LOC_OK (1 if there is no block, or exactly one well-formed
 # one, outside any fence), LOC_BEGIN/LOC_END (line numbers, empty if there is
-# no block), LOC_CRLF (1 if the begin marker line ends in \r) and LOC_REASON
-# (set when LOC_OK is 0, naming the line numbers involved).
+# no block), LOC_CRLF (1 if the begin marker line ends in \r), LOC_IMPORTS
+# (1 if a line outside any fence and outside the block is an `@AGENTS.md`
+# import) and LOC_REASON (set when LOC_OK is 0, naming the line numbers
+# involved).
 instructions_locate() {
   local file=$1 out
-  LOC_OK=1 LOC_BEGIN="" LOC_END="" LOC_CRLF=0 LOC_REASON=""
+  LOC_OK=1 LOC_BEGIN="" LOC_END="" LOC_CRLF=0 LOC_IMPORTS=0 LOC_REASON=""
   [[ -f $file ]] || return 0
   out=$(awk -v begin="$instr_begin" -v end="$instr_end" -v cr="$instr_cr" '
     function rstrip(s) {
@@ -535,7 +544,7 @@ instructions_locate() {
       sub(/[ \t]+$/, "", s)
       return s
     }
-    BEGIN { infence=0; fchar=""; flen=0; fopen=0; nb=0; ne=0; bl=""; el=""; firstb=0; firste=0; crlf=0 }
+    BEGIN { infence=0; fchar=""; flen=0; fopen=0; nb=0; ne=0; bl=""; el=""; firstb=0; firste=0; crlf=0; inblock=0; imp=0 }
     {
       line = $0
       if (match(line, /^ ? ? ?(```+|~~~+)/)) {
@@ -554,13 +563,18 @@ instructions_locate() {
         nb++
         if (nb == 1) { firstb = NR; crlf = (substr(line, length(line), 1) == cr) ? 1 : 0 }
         bl = (bl == "" ? NR : bl "," NR)
+        inblock = 1
       } else if (s == end) {
         ne++
         if (ne == 1) firste = NR
         el = (el == "" ? NR : el "," NR)
+        inblock = 0
+      } else if (!inblock && (s == "@AGENTS.md" || s == "@./AGENTS.md")) {
+        imp = 1
       }
     }
     END {
+      print "imports|" imp
       if (infence) {
         print "ok|0"; print "begin|"; print "end|"; print "crlf|0"
         print "reason|unterminated code fence (opened at line " fopen ")"
@@ -584,6 +598,7 @@ instructions_locate() {
       begin) LOC_BEGIN=$val ;;
       end) LOC_END=$val ;;
       crlf) LOC_CRLF=$val ;;
+      imports) LOC_IMPORTS=$val ;;
       reason) LOC_REASON=$val ;;
     esac
   done <<< "$out"
@@ -738,6 +753,8 @@ instructions_status() {
 
   instructions_locate "$INSTR_CLAUDE"
   local c_ok=$LOC_OK c_begin=$LOC_BEGIN c_reason=$LOC_REASON a_ok=1 a_begin="" a_reason=""
+  # A hand-written `@AGENTS.md` import makes a CLAUDE.md block unnecessary.
+  [[ $INSTR_SHARED == 0 && $LOC_IMPORTS == 1 ]] && c_begin=imported
   if [[ $INSTR_SHARED == 1 ]]; then
     a_ok=$c_ok; a_begin=$c_begin
   else
@@ -783,6 +800,7 @@ cmd_instructions() {
   instructions_check_target "$INSTR_CLAUDE"
   instructions_locate "$INSTR_CLAUDE"
   [[ $LOC_OK == 1 ]] || die "$INSTR_CLAUDE: $LOC_REASON"
+  local claude_imports=$LOC_IMPORTS
   if [[ $INSTR_SHARED == 0 ]]; then
     instructions_check_target "$INSTR_AGENTS"
     instructions_locate "$INSTR_AGENTS"
@@ -793,10 +811,21 @@ cmd_instructions() {
     instructions_apply "$INSTR_CLAUDE" "$block" "$reason"
     info "CLAUDE.md, AGENTS.md (same file): $ISTATUS"
   else
-    instructions_apply "$INSTR_CLAUDE" "$block" "$reason"
-    info "CLAUDE.md: $ISTATUS"
+    # The full note goes in AGENTS.md only; CLAUDE.md imports it, or gets no
+    # block at all if it already imports AGENTS.md itself. AGENTS.md is
+    # written first so the import never points at a missing note.
+    local claude_block="" note=""
+    if [[ -n $block ]]; then
+      if [[ $claude_imports == 1 ]]; then
+        note=" (already imports AGENTS.md)"
+      else
+        claude_block=$(instructions_import_block)
+      fi
+    fi
     instructions_apply "$INSTR_AGENTS" "$block" "$reason"
     info "AGENTS.md: $ISTATUS"
+    instructions_apply "$INSTR_CLAUDE" "$claude_block" "$reason"
+    info "CLAUDE.md: $ISTATUS$note"
   fi
 }
 

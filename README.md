@@ -58,13 +58,16 @@ one `jq` call for unrelated tools. There are no per-prompt or per-search hooks.
 The global import covers your own sessions in every repo. The per-repo block below covers
 everyone else. Where both exist, the agent sees the same advice twice, which is harmless.
 
-`repo-intel instructions` writes a short "Code graphs" block into `CLAUDE.md`
-and `AGENTS.md` at the repo root, so an agent without this plugin (Codex, Cursor,
-a teammate's Claude Code) still knows to use codegraph and graphify instead of
-grepping blind. The block sits between `<!-- repo-intel:begin -->` and
-`<!-- repo-intel:end -->` markers; everything else in both files is left alone,
-and running it again only rewrites the block if it changed. If the two files are
-symlinked to each other, it edits the shared file once and keeps the symlink.
+`repo-intel instructions` writes a short "Code graphs" block into `AGENTS.md`
+at the repo root, so an agent without this plugin (Codex, Cursor, a teammate's
+Claude Code) still knows to use codegraph and graphify instead of grepping blind.
+`CLAUDE.md` gets only an `@AGENTS.md` import, so the note is not repeated; if
+`CLAUDE.md` already imports `AGENTS.md` itself, it gets no block at all. Each block
+sits between `<!-- repo-intel:begin -->` and `<!-- repo-intel:end -->` markers;
+everything else in both files is left alone, and running it again only rewrites a
+block if it changed. A `CLAUDE.md` still holding the full note from an older
+version gets the import in its place. If the two files are symlinked to each
+other, it writes the full note into the shared file once and keeps the symlink.
 `repo-intel setup` runs this step automatically after the first build.
 `repo-intel instructions --remove` deletes the block (never the file).
 
