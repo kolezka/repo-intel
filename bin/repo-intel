@@ -15,11 +15,14 @@ Usage: repo-intel <command> [options]
                              link at ${CLAUDE_CONFIG_DIR:-~/.claude}/repo-intel/CLAUDE.md
   setup                      In the current git repo: index codegraph, add .gitignore
                              entries, install graphify git hooks, then build
-  config [--global] --backend B [--model M] [--base-url URL]
+  config [--global] [--backend B [--model M] [--base-url URL]] [--tools T]
                              Choose the LLM backend for graphify semantic extraction.
                              B: a graphify provider (see `graphify provider list`),
                              ollama, openai, claude, gemini, deepseek, kimi,
                              code-only (no LLM), or agent (current agent CLI subagents)
+                             T: which tools this repo uses: codegraph, graphify or
+                             both (the default). install, setup, build, doctor and
+                             instructions skip the one that is off
   config --show              Print the effective config
   build [--full] [--strict]
                              Refresh codegraph and graphify using the configured backend.
@@ -75,25 +78,59 @@ resolve_llm() {
   return 0
 }
 
+tools_values='codegraph, graphify or both'
+valid_tools() { [[ $1 == codegraph || $1 == graphify || $1 == both ]]; }
+
+# Sets TOOLS, USE_CODEGRAPH and USE_GRAPHIFY: env, else the first config file
+# that sets .tools (repo root, then user), else both. An unknown value is fatal,
+# so a typo never silently turns a tool off.
+resolve_tools() {
+  local root=${1:-} f src=REPO_INTEL_TOOLS
+  TOOLS=${REPO_INTEL_TOOLS:-}
+  if [[ -z $TOOLS ]]; then
+    for f in ${root:+"$root/.repo-intel.json"} "$(user_config)"; do
+      [[ -f $f ]] || continue
+      jq -e . "$f" >/dev/null 2>&1 || die "$f is not valid JSON"
+      TOOLS=$(jq -r '.tools // empty' "$f")
+      [[ -n $TOOLS ]] && { src=$f; break; }
+    done
+  fi
+  TOOLS=${TOOLS:-both}
+  valid_tools "$TOOLS" || die "tools must be $tools_values (got \"$TOOLS\" from $src)"
+  USE_CODEGRAPH=0 USE_GRAPHIFY=0
+  [[ $TOOLS == graphify ]] || USE_CODEGRAPH=1
+  [[ $TOOLS == codegraph ]] || USE_GRAPHIFY=1
+  return 0
+}
+
 # Hook commands this plugin replaces, bare or path-qualified (npx, uvx, /abs/path).
 replaced_hooks='(^|[/[:space:]])graphify hook-guard|(^|[/[:space:]])codegraph prompt-hook'
 
 cmd_doctor() {
-  local ok=0 root settings dup t imported stable link_target
+  local ok=0 root settings dup t imported stable link_target used
+  root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  resolve_tools "$root"
   for t in jq git graphify codegraph; do
+    used=1
+    [[ $t == codegraph ]] && used=$USE_CODEGRAPH
+    [[ $t == graphify ]] && used=$USE_GRAPHIFY
     if have "$t"; then
       printf '  %-15s %s\n' "$t" "$("$t" --version 2>/dev/null | head -1)"
+    elif [[ $used == 0 ]]; then
+      printf '  %-15s not installed, not used (tools=%s)\n' "$t" "$TOOLS"
     else
       printf '  %-15s MISSING\n' "$t"; ok=1
     fi
   done
-  root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  printf '  %-15s %s\n' tools "$TOOLS"
   if [[ -n $root ]]; then
     local has_cg=0 has_gf=0
     printf '  %-15s %s\n' repo "$root"
-    if [[ -d $root/.codegraph ]]; then printf '  %-15s present\n' codegraph-index; has_cg=1
+    if [[ $USE_CODEGRAPH == 0 ]]; then printf '  %-15s off (tools=%s)\n' codegraph-index "$TOOLS"
+    elif [[ -d $root/.codegraph ]]; then printf '  %-15s present\n' codegraph-index; has_cg=1
     else printf '  %-15s none (run: repo-intel setup)\n' codegraph-index; fi
-    if [[ -f $root/graphify-out/graph.json ]]; then
+    if [[ $USE_GRAPHIFY == 0 ]]; then printf '  %-15s off (tools=%s)\n' graphify-graph "$TOOLS"
+    elif [[ -f $root/graphify-out/graph.json ]]; then
       printf '  %-15s present\n' graphify-graph; has_gf=1
       graph_is_stale "$root" && printf '  %-15s stale: docs changed since the last build (run: repo-intel build)\n' graphify-graph
     else printf '  %-15s none (run: repo-intel build)\n' graphify-graph; fi
@@ -202,7 +239,15 @@ install_claude_md() {
 
 cmd_install() {
   local what=${1:-all} v
-  if [[ $what == all || $what == graphify ]]; then
+  # A bare install follows the tools setting; naming a tool installs it regardless.
+  # jq is optional here, so without it the setting cannot be read and both install.
+  USE_CODEGRAPH=1 USE_GRAPHIFY=1
+  if [[ $what == all ]] && have jq; then
+    resolve_tools "$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ $USE_GRAPHIFY == 1 ]] || info "graphify skipped (tools=$TOOLS)"
+    [[ $USE_CODEGRAPH == 1 ]] || info "codegraph skipped (tools=$TOOLS)"
+  fi
+  if [[ $what == graphify || ( $what == all && $USE_GRAPHIFY == 1 ) ]]; then
     # uv resolves `pkg@latest` to the newest release and reinstalls over
     # whatever is there, so no separate --upgrade/--force is needed.
     if have uv; then uv tool install graphifyy@latest
@@ -221,7 +266,7 @@ cmd_install() {
       [[ -n $v ]] && info "graphify: $v"
     fi
   fi
-  if [[ $what == all || $what == codegraph ]]; then
+  if [[ $what == codegraph || ( $what == all && $USE_CODEGRAPH == 1 ) ]]; then
     # An explicit @latest always resolves and installs that version, whether
     # codegraph is new or already on PATH, so this covers install and upgrade.
     if have pnpm; then pnpm add -g @colbymchenry/codegraph@latest
@@ -237,8 +282,10 @@ cmd_install() {
 }
 
 ensure_gitignore() {
-  local root=$1 entry
-  for entry in .codegraph/ graphify-out/cache/; do
+  local root=$1 entry entries=()
+  [[ $USE_CODEGRAPH == 1 ]] && entries+=(.codegraph/)
+  [[ $USE_GRAPHIFY == 1 ]] && entries+=(graphify-out/cache/)
+  for entry in "${entries[@]}"; do
     grep -qxF "$entry" "$root/.gitignore" 2>/dev/null || printf '%s\n' "$entry" >> "$root/.gitignore"
   done
 }
@@ -259,17 +306,18 @@ ensure_graphifyignore() {
 
 cmd_setup() {
   local root; root=$(repo_root)
-  have codegraph || die "codegraph missing (run: repo-intel install)"
-  have graphify || die "graphify missing (run: repo-intel install)"
+  resolve_tools "$root"
+  if [[ $USE_CODEGRAPH == 1 ]]; then have codegraph || die "codegraph missing (run: repo-intel install)"; fi
+  if [[ $USE_GRAPHIFY == 1 ]]; then have graphify || die "graphify missing (run: repo-intel install)"; fi
   ensure_gitignore "$root"
-  [[ -d $root/.codegraph ]] || (cd "$root" && codegraph init -y)
-  (cd "$root" && graphify hook install)
+  if [[ $USE_CODEGRAPH == 1 && ! -d $root/.codegraph ]]; then (cd "$root" && codegraph init -y); fi
+  if [[ $USE_GRAPHIFY == 1 ]]; then (cd "$root" && graphify hook install); fi
   cmd_build
   cmd_instructions
 }
 
 cmd_config() {
-  local global=0 show=0 backend="" model="" base_url="" target root
+  local global=0 show=0 backend="" model="" base_url="" tools="" target root current
   while [[ $# -gt 0 ]]; do
     case $1 in
       --global) global=1 ;;
@@ -277,6 +325,7 @@ cmd_config() {
       --backend) backend=${2:?--backend needs a value}; shift ;;
       --model) model=${2:?--model needs a value}; shift ;;
       --base-url) base_url=${2:?--base-url needs a value}; shift ;;
+      --tools) tools=${2:?--tools needs a value}; shift ;;
       *) die "unknown option: $1" ;;
     esac
     shift
@@ -284,10 +333,13 @@ cmd_config() {
   root=$(git rev-parse --show-toplevel 2>/dev/null || true)
   if [[ $show == 1 ]]; then
     resolve_llm "$root"
-    printf 'backend=%s model=%s base_url=%s\n' "$BACKEND" "$MODEL" "$BASE_URL"
+    resolve_tools "$root"
+    printf 'backend=%s model=%s base_url=%s tools=%s\n' "$BACKEND" "$MODEL" "$BASE_URL" "$TOOLS"
     return
   fi
-  [[ -n $backend ]] || die "config needs --backend (or --show)"
+  [[ -n $backend || -n $tools ]] || die "config needs --backend, --tools or --show"
+  [[ -n $backend || ( -z $model && -z $base_url ) ]] || die "--model and --base-url need --backend"
+  [[ -z $tools ]] || valid_tools "$tools" || die "--tools must be $tools_values"
   if [[ -n $base_url ]]; then
     case $backend in
       openai|claude|ollama) ;;
@@ -300,9 +352,16 @@ cmd_config() {
     [[ -n $root ]] || die "not in a git repo; use --global"
     target=$root/.repo-intel.json
   fi
+  current='{}'
+  if [[ -f $target ]]; then
+    jq -e 'type == "object"' "$target" >/dev/null 2>&1 || die "$target is not a JSON object; fix or remove it first"
+    current=$(cat "$target")
+  fi
   # Only names and URLs go in the file; API keys stay in the environment.
-  jq -n --arg b "$backend" --arg m "$model" --arg u "$base_url" \
-    '{llm: ({backend: $b} + (if $m != "" then {model: $m} else {} end) + (if $u != "" then {base_url: $u} else {} end))}' \
+  # --backend replaces the whole llm section, --tools only the tools key; other keys stay.
+  jq --arg b "$backend" --arg m "$model" --arg u "$base_url" --arg t "$tools" '
+    (if $b != "" then .llm = ({backend: $b} + (if $m != "" then {model: $m} else {} end) + (if $u != "" then {base_url: $u} else {} end)) else . end)
+    | (if $t != "" then .tools = $t else . end)' <<<"$current" \
     > "$target.tmp" && mv "$target.tmp" "$target"
   info "wrote $target"
 }
@@ -336,15 +395,22 @@ cmd_build() {
   done
   [[ $full == 1 ]] && args+=(--force)
   root=$(repo_root)
+  resolve_tools "$root"
   resolve_llm "$root"
   backend=$BACKEND model=$MODEL base_url=$BASE_URL
 
-  if have codegraph; then
+  if [[ $USE_CODEGRAPH == 0 ]]; then
+    info "codegraph off (tools=$TOOLS), skipped"
+  elif have codegraph; then
     if [[ -d $root/.codegraph ]]; then (cd "$root" && codegraph sync); else (cd "$root" && codegraph init -y); fi
+  elif [[ $USE_GRAPHIFY == 0 ]]; then
+    # Skipping here would leave a codegraph-only build that did nothing and exited 0.
+    die "codegraph missing (run: repo-intel install)"
   else
     info "codegraph missing, skipped"
   fi
 
+  [[ $USE_GRAPHIFY == 1 ]] || { info "graphify off (tools=$TOOLS), skipped"; return 0; }
   have graphify || die "graphify missing (run: repo-intel install)"
   ensure_graphifyignore "$root"
   case ${backend:-code-only} in
@@ -779,8 +845,10 @@ cmd_instructions() {
     esac
   done
   root=$(repo_root)
-  [[ -d $root/.codegraph ]] && has_cg=1
-  [[ -f $root/graphify-out/graph.json ]] && has_gf=1
+  resolve_tools "$root"
+  # A tool that is off stays out of the note even if its old output is still on disk.
+  [[ $USE_CODEGRAPH == 1 && -d $root/.codegraph ]] && has_cg=1
+  [[ $USE_GRAPHIFY == 1 && -f $root/graphify-out/graph.json ]] && has_gf=1
 
   if [[ $remove == 0 ]]; then
     if [[ $has_cg == 1 || $has_gf == 1 ]]; then

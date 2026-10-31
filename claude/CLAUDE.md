@@ -15,4 +15,6 @@ graph (at the git root or in a sub-project). Elsewhere, ignore this section.
   graph as stale, run `repo-intel build` first.
 - Build or refresh graphs with `repo-intel build`. Do not dispatch graphify
   extraction subagents unless `repo-intel config --show` reports `backend=agent`.
+- `repo-intel config --show` also reports `tools=` (codegraph, graphify or both). Use
+  only the tools it names, even if the other one's files are still on disk.
 - Full routing table: the `/repo-intel:route` skill.

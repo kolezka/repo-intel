@@ -83,6 +83,35 @@ code fences are ignored. Writes are atomic and keep the file's mode.
 
 Skills: `/repo-intel:setup`, `/repo-intel:build`, `/repo-intel:route` (which tool answers which question).
 
+## Choosing the tools
+
+By default a repo uses both codegraph and graphify. To use only one, set `tools` in the
+same config file as the backend:
+
+```bash
+repo-intel config --tools codegraph      # or graphify, or both
+```
+
+```json
+{ "tools": "codegraph", "llm": { "backend": "litellm" } }
+```
+
+`REPO_INTEL_TOOLS` overrides the file. Otherwise the first file that sets `tools` wins
+(repo `.repo-intel.json`, then `~/.config/repo-intel/config.json`), on its own: a repo
+file with only a backend still takes `tools` from the user file. An unknown value is an
+error, not a silent fallback.
+
+The tool that is off is skipped everywhere: a bare `install` does not install it
+(`install graphify` or `install codegraph` still does), `setup` neither indexes it nor
+adds its `.gitignore` entry nor installs its git hooks, `build` does not run it,
+`doctor` reports it as off instead of missing, and `instructions` leaves it out of the
+note even if its old output is still on disk. With `tools=codegraph`, a missing
+`codegraph` fails the build rather than doing nothing. The build guard hook does not
+read `tools`.
+
+`config --tools` changes only the `tools` key and `config --backend` replaces only the
+`llm` section, so each keeps the other.
+
 ## LLM backend
 
 `repo-intel build` calls `graphify extract --backend <backend> [--model <model>]`.
