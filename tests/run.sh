@@ -1189,6 +1189,100 @@ echo "$out" | grep -qE '^  instructions +invalid \(hardlinked file\)$'
 check "doctor reports invalid (hardlinked file) for a hardlinked pair" $? "got: $out"
 check "doctor's exit status is unaffected by a hardlinked pair" "$([ "$rc" = 0 ]; echo $?)" "exit code was $rc"
 
+echo "tools"
+
+rm -f "$XDG_CONFIG_HOME/repo-intel/config.json"
+r=$(new_repo tools-cfg)
+out=$(cd "$r" && "$cli" config --show 2>&1)
+check "tools defaults to both" "$(echo "$out" | grep -q ' tools=both$'; echo $?)" "got: $out"
+(cd "$r" && "$cli" config --backend litellm --model m1 >/dev/null 2>&1)
+(cd "$r" && "$cli" config --tools codegraph >/dev/null 2>&1)
+jq -e '. == {"llm":{"backend":"litellm","model":"m1"},"tools":"codegraph"}' "$r/.repo-intel.json" >/dev/null 2>&1
+check "config --tools sets tools and keeps the llm section" $? "got: $(cat "$r/.repo-intel.json")"
+(cd "$r" && "$cli" config --backend ollama >/dev/null 2>&1)
+jq -e '. == {"llm":{"backend":"ollama"},"tools":"codegraph"}' "$r/.repo-intel.json" >/dev/null 2>&1
+check "config --backend replaces llm and keeps tools" $? "got: $(cat "$r/.repo-intel.json")"
+cp "$r/.repo-intel.json" "$work/tools-before.json"
+out=$(cd "$r" && "$cli" config --tools codgraph 2>&1); rc=$?
+check "config --tools rejects an unknown value and writes nothing" \
+  "$([ $rc != 0 ] && cmp -s "$work/tools-before.json" "$r/.repo-intel.json"; echo $?)" "rc=$rc out: $out"
+out=$(cd "$r" && "$cli" config --model x 2>&1); rc=$?
+check "config --model without --backend is refused" "$([ $rc != 0 ]; echo $?)" "rc=$rc out: $out"
+out=$(cd "$r" && "$cli" config --show 2>&1)
+check "config --show reports the repo tools" "$(echo "$out" | grep -q ' tools=codegraph$'; echo $?)" "got: $out"
+out=$(cd "$r" && REPO_INTEL_TOOLS=graphify "$cli" config --show 2>&1)
+check "REPO_INTEL_TOOLS overrides the config file" "$(echo "$out" | grep -q ' tools=graphify$'; echo $?)" "got: $out"
+
+ru=$(new_repo tools-user)
+printf '{"llm":{"backend":"litellm"}}' > "$ru/.repo-intel.json"
+mkdir -p "$XDG_CONFIG_HOME/repo-intel"
+printf '{"tools":"graphify"}' > "$XDG_CONFIG_HOME/repo-intel/config.json"
+out=$(cd "$ru" && "$cli" config --show 2>&1)
+check "tools falls back to the user config when the repo config has none" "$(echo "$out" | grep -q ' tools=graphify$'; echo $?)" "got: $out"
+out=$(cd "$r" && "$cli" config --show 2>&1)
+check "repo tools win over user tools" "$(echo "$out" | grep -q ' tools=codegraph$'; echo $?)" "got: $out"
+rm -f "$XDG_CONFIG_HOME/repo-intel/config.json"
+
+rm -f "$work/graphify.log" "$work/codegraph.log"
+printf '{"tools":"codegraph"}' > "$r/.repo-intel.json"
+out=$(cd "$r" && "$cli" build 2>&1); rc=$?
+check "tools=codegraph: build runs codegraph only and succeeds" \
+  "$([ $rc = 0 ] && [ -s "$work/codegraph.log" ] && [ ! -e "$work/graphify.log" ] && [ ! -e "$r/graphify-out" ]; echo $?)" \
+  "rc=$rc out: $out; graphify log: $(cat "$work/graphify.log" 2>/dev/null)"
+
+rm -f "$work/graphify.log" "$work/codegraph.log"
+printf '{"tools":"graphify"}' > "$r/.repo-intel.json"
+out=$(cd "$r" && "$cli" build 2>&1); rc=$?
+check "tools=graphify: build runs graphify only and succeeds" \
+  "$([ $rc = 0 ] && [ ! -e "$work/codegraph.log" ] && grep -qx 'extract . --code-only' "$work/graphify.log"; echo $?)" \
+  "rc=$rc out: $out; codegraph log: $(cat "$work/codegraph.log" 2>/dev/null)"
+
+rm -f "$work/graphify.log" "$work/codegraph.log"
+printf '{"tools":"graphfy"}' > "$r/.repo-intel.json"
+out=$(cd "$r" && "$cli" build 2>&1); rc=$?
+check "an unknown tools value fails the build before running anything" \
+  "$([ $rc != 0 ] && echo "$out" | grep -q 'tools must be' && [ ! -e "$work/codegraph.log" ] && [ ! -e "$work/graphify.log" ]; echo $?)" \
+  "rc=$rc out: $out"
+
+mkdir -p "$work/bin-nocg"
+ln -sf "$work/fakebin/graphify" "$work/bin-nocg/graphify"
+ln -sf "$(command -v jq)" "$work/bin-nocg/jq"
+printf '{"tools":"codegraph"}' > "$r/.repo-intel.json"
+out=$(cd "$r" && PATH="$work/bin-nocg:/usr/bin:/bin" "$cli" build 2>&1); rc=$?
+check "tools=codegraph with codegraph missing fails the build instead of doing nothing" \
+  "$([ $rc != 0 ] && echo "$out" | grep -q 'codegraph missing'; echo $?)" "rc=$rc out: $out"
+
+mkdir -p "$r/.codegraph" "$r/graphify-out" && printf '{}\n' > "$r/graphify-out/graph.json"
+out=$(cd "$r" && PATH="$work/bin-nocg:/usr/bin:/bin" REPO_INTEL_TOOLS=graphify "$cli" doctor 2>&1)
+check "doctor: an unused, missing tool is not reported MISSING" \
+  "$(echo "$out" | grep -qE '^  codegraph +not installed, not used \(tools=graphify\)$' && ! echo "$out" | grep -q MISSING; echo $?)" "got: $out"
+out=$(cd "$r" && "$cli" doctor 2>&1)
+check "doctor shows tools and marks the off tool's graph as off" \
+  "$(echo "$out" | grep -qE '^  tools +codegraph$' && echo "$out" | grep -qE '^  graphify-graph +off \(tools=codegraph\)$' && echo "$out" | grep -qE '^  codegraph-index +present$'; echo $?)" "got: $out"
+
+(cd "$r" && "$cli" instructions >/dev/null 2>&1)
+check "instructions leave the off tool out even when its graph is on disk" \
+  "$(grep -q 'use codegraph' "$r/AGENTS.md" && ! grep -q 'use graphify' "$r/AGENTS.md"; echo $?)" "got: $(cat "$r/AGENTS.md" 2>/dev/null)"
+
+rs=$(new_repo tools-setup)
+printf '{"tools":"codegraph"}' > "$rs/.repo-intel.json"
+rm -f "$work/graphify.log" "$work/codegraph.log"
+out=$(cd "$rs" && "$cli" setup 2>&1); rc=$?
+check "tools=codegraph: setup skips graphify hooks and its .gitignore entry" \
+  "$([ $rc = 0 ] && [ ! -e "$work/graphify.log" ] && grep -qxF '.codegraph/' "$rs/.gitignore" && ! grep -qF 'graphify-out' "$rs/.gitignore"; echo $?)" \
+  "rc=$rc out: $out; gitignore: $(cat "$rs/.gitignore" 2>/dev/null); graphify log: $(cat "$work/graphify.log" 2>/dev/null)"
+
+rm -f "$work/uv.log" "$work/pnpm.log"
+out=$(cd "$rs" && PATH=$(install_path bin-uv bin-pnpm fakebin) "$cli" install 2>&1)
+check "tools=codegraph: bare install skips graphify" \
+  "$([ ! -e "$work/uv.log" ] && grep -qx 'add -g @colbymchenry/codegraph@latest' "$work/pnpm.log"; echo $?)" \
+  "uv: $(cat "$work/uv.log" 2>/dev/null); pnpm: $(cat "$work/pnpm.log" 2>/dev/null); out: $out"
+rm -f "$work/uv.log"
+(cd "$rs" && PATH=$(install_path bin-uv fakebin) "$cli" install graphify >/dev/null 2>&1)
+check "naming a tool installs it even when tools turns it off" \
+  "$(grep -qx 'tool install graphifyy@latest' "$work/uv.log" 2>/dev/null; echo $?)" "uv: $(cat "$work/uv.log" 2>/dev/null)"
+cfg_reset
+
 echo "graphify contract (real binary)"
 real_graphify=$(PATH=$orig_path command -v graphify 2>/dev/null || true)
 if [ -z "$real_graphify" ]; then

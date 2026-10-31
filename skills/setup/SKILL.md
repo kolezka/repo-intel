@@ -8,7 +8,10 @@ description: Use when the user asks to set up, install, enable or configure code
 The CLI is `repo-intel` (on PATH while the plugin is enabled; otherwise
 `${CLAUDE_PLUGIN_ROOT}/bin/repo-intel`). Run every step from the repository root.
 
-1. `repo-intel doctor`. Read the report, then act only on what it lists.
+1. `repo-intel doctor`. Read the report, then act only on what it lists. Its
+   `tools` line says which tools the repo uses. If the user wants only one,
+   run `repo-intel config --tools codegraph` (or `graphify`); every later step
+   then skips the other one. A tool reported as "not used" is not a problem.
 2. Missing `graphify` or `codegraph`: ask the user before installing, then run
    `repo-intel install`. It uses uv or pipx for graphify and pnpm or npm for
    codegraph. It also imports this plugin's routing note into the global
