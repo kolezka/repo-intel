@@ -1,0 +1,22 @@
+{
+  "name": "@kolezka/repo-intel-dsh",
+  "version": "0.1.8",
+  "private": true,
+  "description": "DeepSeek Harness adapter for the repo-intel Claude Code plugin",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "claude-compat.js",
+    "cordis.patch.yml",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
