@@ -26,7 +26,7 @@
 
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,9 +35,11 @@ export const COMPAT_VERSION = '0.1.0'
 export const SKILL_RANK = 450
 const HOOK_STDOUT_LIMIT = 256 * 1024
 const DEFAULT_HOOK_TIMEOUT_S = 60
-// Events whose hooks read the transcript. Other events get the path of the last export,
-// so a per-tool-call hook does not rewrite the whole session on every call.
-const TRANSCRIPT_EVENTS = new Set(['Stop', 'SubagentStop', 'SessionEnd', 'PreCompact'])
+// Grace period for stdout after the hook process exits, in case a backgrounded child
+// keeps the pipe open (Claude Code does not wait for those either).
+const HOOK_DRAIN_MS = 50
+// Plain stdout and systemMessage reach the model only for these events, as in Claude Code.
+const PLAIN_CONTEXT_EVENTS = new Set(['SessionStart', 'UserPromptSubmit'])
 
 // DSH tool name -> Claude Code tool name, for matchers and tool_name in hook input.
 export const TOOL_NAME_MAP = {
@@ -79,10 +81,31 @@ export function parseFrontMatter(text) {
   return { meta, body: text.slice(match[0].length) }
 }
 
-/** Remove `<!--harness:claude-only--> ... <!--/harness-->` blocks. */
-export function stripClaudeOnly(text) {
-  return text.replace(/^[^\n]*<!--\s*harness:claude-only\s*-->[\s\S]*?<!--\s*\/harness\s*-->[^\n]*\n?/gm, '')
+// A marker counts only on a line of its own, optionally after heading hashes (`## <!--/harness-->`).
+const CLAUDE_ONLY_OPEN = /^\s*(?:#+\s*)?<!--\s*harness:claude-only\s*-->\s*$/
+const CLAUDE_ONLY_CLOSE = /^\s*(?:#+\s*)?<!--\s*\/harness\s*-->\s*$/
+
+/**
+ * Remove `<!--harness:claude-only--> ... <!--/harness-->` blocks.
+ * An opener without a closer drops the rest of the file, so Claude-only text never leaks.
+ * @returns {{ text: string, unterminated: boolean }}
+ */
+export function stripClaudeOnlyBlocks(text) {
+  const out = []
+  let inside = false
+  for (const line of text.split(/(?<=\n)/)) {
+    const bare = line.replace(/\r?\n$/, '')
+    if (!inside && CLAUDE_ONLY_OPEN.test(bare)) inside = true
+    else if (inside && CLAUDE_ONLY_CLOSE.test(bare)) inside = false
+    else if (!inside) out.push(line)
+  }
+  return { text: out.join(''), unterminated: inside }
 }
+
+export const stripClaudeOnly = (text) => stripClaudeOnlyBlocks(text).text
+
+/** Keep hook text from closing the tag it is wrapped in. */
+export const escapeClosingTag = (text, tag) => String(text).replaceAll(`</${tag}`, `<\\/${tag}`)
 
 /** Replace the Claude plugin root variables with the real plugin directory. */
 export function expandPluginRoot(text, root) {
@@ -207,16 +230,18 @@ export function renderCommand(body, rawInput, root) {
   const positional = args ? args.split(/\s+/) : []
   let text = expandPluginRoot(body, root)
   const usesArgs = /\$ARGUMENTS|\$[1-9]/.test(text)
-  text = text.replaceAll('$ARGUMENTS', args).replace(/\$([1-9])/g, (_, n) => positional[Number(n) - 1] ?? '')
+  // One pass with a function: user text is never re-scanned or read as a replacement pattern.
+  text = text.replace(/\$(ARGUMENTS|[1-9])/g, (_, key) => (key === 'ARGUMENTS' ? args : positional[Number(key) - 1] ?? ''))
   if (!usesArgs && args) text += `\n\nArguments: ${args}`
   return text
 }
 
 // ---------------------------------------------------------------- DSH session helpers
 
+// The full log, fork-inherited prefix included, as Claude Code transcripts also carry it.
 function sessionEvents(session) {
   try {
-    return session.ownEvents?.() ?? session.snapshotEvents?.() ?? session.events ?? []
+    return session.snapshotEvents?.() ?? session.events ?? session.ownEvents?.() ?? []
   } catch {
     return []
   }
@@ -303,11 +328,28 @@ function transcriptPath(agent) {
   return join(stateHome(), 'transcripts', `${String(agent.session.header.id).replace(/[^A-Za-z0-9_-]/g, '')}.jsonl`)
 }
 
-function writeTranscript(agent, cwd) {
+// Exported event count per transcript path; the file only ever grows by the new tail.
+const exported = new Map()
+
+/** Bring the Claude-shaped transcript up to date by appending events not yet written. */
+function syncTranscript(agent, cwd) {
   const path = transcriptPath(agent)
-  mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, toClaudeTranscript(sessionEvents(agent.session), agent.session.header.id, cwd))
+  const events = sessionEvents(agent.session)
+  let done = exported.get(path)
+  if (done === undefined || done > events.length || !existsSync(path)) {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+    writeFileSync(path, '', { mode: 0o600 })
+    done = 0
+  }
+  if (events.length > done) appendFileSync(path, toClaudeTranscript(events.slice(done), agent.session.header.id, cwd), { mode: 0o600 })
+  exported.set(path, events.length)
   return path
+}
+
+function dropTranscript(agent) {
+  const path = transcriptPath(agent)
+  exported.delete(path)
+  rmSync(path, { force: true })
 }
 
 function lastAssistantText(session) {
@@ -320,57 +362,92 @@ function lastAssistantText(session) {
 
 // ---------------------------------------------------------------- hook execution
 
-/** Run one hook command with Claude Code's hook contract: JSON on stdin, exit 2 blocks. */
-export function runHook(hook, input, env) {
+/**
+ * Run one hook command with Claude Code's hook contract: JSON on stdin, exit 2 blocks.
+ * The hook runs in its own process group; a timeout or abort kills the whole group, and
+ * the result is taken at process exit, not when every inherited stdout handle closes.
+ */
+export function runHook(hook, input, env, signal) {
   return new Promise((resolvePromise) => {
     let stdout = ''
     let stderr = ''
+    let truncated = false
     let settled = false
-    const child = spawn('/bin/sh', ['-c', hook.command], { cwd: input.cwd || process.cwd(), env, stdio: ['pipe', 'pipe', 'pipe'] })
+    let drain
+    const child = spawn('/bin/sh', ['-c', hook.command], { cwd: input.cwd || process.cwd(), env, stdio: ['pipe', 'pipe', 'pipe'], detached: true })
+    const killGroup = () => {
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch {
+        child.kill('SIGKILL')
+      }
+    }
     const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      finish({ code: null, stdout, stderr: stderr + `\nhook timed out after ${hook.timeout}s`, timedOut: true })
+      killGroup()
+      finish({ code: null, stdout, stderr: stderr + `\nhook timed out after ${hook.timeout}s`, timedOut: true, truncated })
     }, (hook.timeout || DEFAULT_HOOK_TIMEOUT_S) * 1000)
+    const onAbort = () => {
+      killGroup()
+      finish({ code: null, stdout: '', stderr: 'hook cancelled', timedOut: false, truncated: false, aborted: true })
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
     function finish(result) {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(drain)
+      signal?.removeEventListener('abort', onAbort)
+      child.stdout.destroy()
+      child.stderr.destroy()
       resolvePromise(result)
     }
     child.stdout.on('data', (chunk) => {
-      if (stdout.length < HOOK_STDOUT_LIMIT) stdout += chunk
+      if (stdout.length + chunk.length > HOOK_STDOUT_LIMIT) truncated = true
+      else stdout += chunk
     })
     child.stderr.on('data', (chunk) => {
       if (stderr.length < HOOK_STDOUT_LIMIT) stderr += chunk
     })
-    child.on('error', (error) => finish({ code: null, stdout, stderr: String(error), timedOut: false }))
-    child.on('close', (code) => finish({ code, stdout, stderr, timedOut: false }))
+    child.on('error', (error) => finish({ code: null, stdout, stderr: String(error), timedOut: false, truncated }))
+    child.on('exit', (code) => {
+      drain = setTimeout(() => finish({ code, stdout, stderr, timedOut: false, truncated }), HOOK_DRAIN_MS)
+    })
+    child.on('close', (code) => finish({ code, stdout, stderr, timedOut: false, truncated }))
     child.stdin.on('error', () => {})
     child.stdin.end(JSON.stringify(input))
   })
 }
 
-/** Normalize a hook result to one decision shape across events. */
-export function interpretHookResult(result) {
-  const out = { context: [], decision: undefined, reason: undefined }
+/**
+ * Normalize a hook result to one decision shape across events.
+ * @param {object} result - from runHook.
+ * @param {string} [event] - Claude hook event; plain stdout counts as context only for
+ *   SessionStart and UserPromptSubmit, as in Claude Code.
+ */
+export function interpretHookResult(result, event) {
+  const out = { context: [], decision: undefined, reason: undefined, notices: [] }
   if (result.code === 2) {
     out.decision = 'block'
     out.reason = result.stderr.trim() || 'blocked by hook'
     return out
   }
   if (result.code !== 0) return out
+  if (result.truncated) {
+    out.notices.push(`hook output over ${HOOK_STDOUT_LIMIT} bytes was dropped`)
+    return out
+  }
   const text = result.stdout.trim()
   if (!text) return out
   let json
   try {
     json = JSON.parse(text)
   } catch {
-    out.context.push(text)
+    if (event === undefined || PLAIN_CONTEXT_EVENTS.has(event)) out.context.push(text)
     return out
   }
   const specific = json.hookSpecificOutput ?? {}
   if (specific.additionalContext) out.context.push(String(specific.additionalContext))
-  if (json.systemMessage) out.context.push(String(json.systemMessage))
+  if (json.systemMessage) out.notices.push(String(json.systemMessage))
   if (specific.permissionDecision) {
     out.decision = specific.permissionDecision
     out.reason = specific.permissionDecisionReason
@@ -531,7 +608,7 @@ export function createPlugin(spec) {
             invocation.agent.followup({
               id: randomUUID(),
               role: 'user',
-              content: [{ type: 'text', text: `<command-name>/${prefix}:${command.stem}</command-name>\n\n${renderCommand(body, invocation.rawInput, root)}` }],
+              content: [{ type: 'text', text: `<command-name>/${pluginName}:${command.stem}</command-name>\n\n${renderCommand(body, invocation.rawInput, root)}` }],
               source: { kind: 'user' },
             })
             return { kind: 'success', text: `/${name} queued` }
@@ -555,9 +632,14 @@ export function createPlugin(spec) {
       interpolate: false,
       text: () =>
         files
-          .map((file) => readText(resolve(root, file)))
+          .map((file) => {
+            const raw = readText(resolve(root, file))
+            if (raw === undefined) return ''
+            const stripped = stripClaudeOnlyBlocks(expandPluginRoot(raw, root))
+            if (stripped.unterminated) warn(`${file}: <!--harness:claude-only--> has no closing <!--/harness-->, the rest of the file was dropped`)
+            return stripped.text.trim()
+          })
           .filter(Boolean)
-          .map((text) => stripClaudeOnly(expandPluginRoot(text, root)).trim())
           .join('\n\n'),
     })
   }
@@ -569,8 +651,8 @@ export function createPlugin(spec) {
     const hooks = readHooks(root).filter((hook) => !only || only.has(hook.event))
     if (!hooks.length) return
     const byEvent = (event) => hooks.filter((hook) => hook.event === event)
-    const started = new WeakSet()
     const stopBlocks = new WeakMap()
+    const tag = `${pluginName}-hook`
     let workingDirectory
     ctx.inject(['workingDirectory'], (sub) => {
       workingDirectory = sub.workingDirectory
@@ -578,12 +660,6 @@ export function createPlugin(spec) {
         workingDirectory = undefined
       })
     })
-
-    const baseEnv = () => {
-      const env = { ...process.env, CLAUDE_PLUGIN_ROOT: root, CLAUDE_HARNESS: 'dsh', DSH_CLAUDE_COMPAT: COMPAT_VERSION }
-      for (const [key, value] of Object.entries(spec.env ?? {})) env[key] = expandPluginRoot(String(value), root)
-      return env
-    }
 
     const cwdOf = (agent) => {
       try {
@@ -593,80 +669,83 @@ export function createPlugin(spec) {
       }
     }
 
-    const inputFor = (agent, event, extra = {}) => {
-      const cwd = cwdOf(agent)
+    const envFor = (cwd) => {
+      const env = { ...process.env, CLAUDE_PLUGIN_ROOT: root, CLAUDE_PROJECT_DIR: cwd, CLAUDE_HARNESS: 'dsh', DSH_CLAUDE_COMPAT: COMPAT_VERSION }
+      for (const [key, value] of Object.entries(spec.env ?? {})) env[key] = expandPluginRoot(String(value), root)
+      return env
+    }
+
+    const inputFor = (agent, event, cwd, extra = {}) => {
       let transcript = transcriptPath(agent)
-      if (TRANSCRIPT_EVENTS.has(event) || !existsSync(transcript)) {
-        try {
-          transcript = writeTranscript(agent, cwd)
-        } catch (error) {
-          warn(`transcript export failed: ${error.message}`)
-        }
+      try {
+        transcript = syncTranscript(agent, cwd)
+      } catch (error) {
+        warn(`transcript export failed: ${error.message}`)
       }
       return { session_id: String(agent.session.header.id), transcript_path: transcript, cwd, hook_event_name: event, permission_mode: 'default', ...extra }
     }
 
-    async function fire(event, agent, extra, filter) {
+    // Matching hooks run in parallel, as in Claude Code; results keep hooks.json order.
+    async function fire(event, agent, extra, { filter, signal } = {}) {
       const list = byEvent(event).filter(filter ?? (() => true))
       if (!list.length) return []
-      const input = inputFor(agent, event, extra)
-      const env = baseEnv()
-      const results = []
-      for (const hook of list) {
-        try {
-          const result = await runHook(hook, input, env)
-          if (result.timedOut || (result.code !== 0 && result.code !== 2)) warn(`${event} hook exited ${result.code}: ${result.stderr.trim().slice(0, 300)}`)
-          results.push(interpretHookResult(result))
-        } catch (error) {
-          warn(`${event} hook failed: ${error.message}`)
-        }
-      }
-      return results
+      const cwd = cwdOf(agent)
+      const input = inputFor(agent, event, cwd, extra)
+      const env = envFor(cwd)
+      const settled = await Promise.all(
+        list.map((hook) =>
+          runHook(hook, input, env, signal).catch((error) => ({ code: null, stdout: '', stderr: String(error?.message ?? error), timedOut: false })),
+        ),
+      )
+      return settled.map((result) => {
+        if (!result.aborted && (result.timedOut || (result.code !== 0 && result.code !== 2))) warn(`${event} hook exited ${result.code}: ${result.stderr.trim().slice(0, 300)}`)
+        const interpreted = interpretHookResult(result, event)
+        for (const notice of interpreted.notices) warn(`${event}: ${notice}`)
+        return interpreted
+      })
     }
+
+    const hookMessage = (event, text) => ({
+      id: randomUUID(),
+      role: 'user',
+      content: [{ type: 'text', text: `<${tag} event="${event}">\n${escapeClosingTag(text, tag)}\n</${tag}>` }],
+      source: { kind: `plugin:${id}` },
+    })
 
     function injectContext(agent, event, results) {
       const text = results.flatMap((r) => r.context).filter(Boolean).join('\n\n')
-      if (!text) return
-      agent.inject({
-        id: randomUUID(),
-        role: 'user',
-        content: [{ type: 'text', text: `<${pluginName}-hook event="${event}">\n${text}\n</${pluginName}-hook>` }],
-        source: { kind: `plugin:${id}` },
-      })
+      if (text) agent.inject(hookMessage(event, text))
     }
 
     const isSubagent = (agent) => agent.session.header.origin === 'subagent'
 
-    if (byEvent('SessionStart').length || byEvent('UserPromptSubmit').length) {
-      ctx.on(
-        'agent/pre-step',
-        async (payload, next) => {
-          const decision = await next()
-          if (decision.kind !== 'enter' || payload.signal?.aborted) return decision
-          const { agent } = payload
-          const added = []
-          if (!started.has(agent)) {
-            started.add(agent)
-            const results = await fire('SessionStart', agent, { source: 'startup' })
-            added.push(...results.flatMap((r) => r.context))
-          }
-          const prompt = decision.messages.filter((m) => m?.source?.kind === 'user').map(textOf).join('\n').trim()
-          if (prompt && byEvent('UserPromptSubmit').length) {
-            const results = await fire('UserPromptSubmit', agent, { prompt })
-            const blocked = results.find((r) => r.decision === 'block')
-            if (blocked) {
-              added.push(`The ${pluginName} plugin blocked this prompt: ${blocked.reason ?? 'no reason given'}. Tell the user and do not act on it.`)
-            }
-            added.push(...results.flatMap((r) => r.context))
-          }
-          const text = added.filter(Boolean).join('\n\n')
-          if (!text) return decision
-          return {
-            ...decision,
-            messages: [...decision.messages, { id: randomUUID(), role: 'user', content: [{ type: 'text', text: `<${pluginName}-hook>\n${text}\n</${pluginName}-hook>` }], source: { kind: `plugin:${id}` } }],
-          }
-        },
-      )
+    // SessionStart: once per root agent, before its first input. Claude Code does not run
+    // it for subagents. `source` is DSH's own startup|resume|clear|compact value.
+    if (byEvent('SessionStart').length) {
+      ctx.on('agent/created', async ({ agent, source, signal }) => {
+        if (isSubagent(agent)) return
+        const results = await fire('SessionStart', agent, { source: source ?? 'startup' }, { signal })
+        injectContext(agent, 'SessionStart', results)
+      })
+    }
+
+    if (byEvent('UserPromptSubmit').length) {
+      ctx.on('agent/pre-step', async (payload, next) => {
+        const decision = await next()
+        if (decision.kind !== 'enter' || payload.signal?.aborted) return decision
+        const prompt = decision.messages.filter((m) => m?.source?.kind === 'user').map(textOf).join('\n').trim()
+        if (!prompt) return decision
+        const results = await fire('UserPromptSubmit', payload.agent, { prompt }, { signal: payload.signal })
+        const blocked = results.find((r) => r.decision === 'block')
+        if (blocked) {
+          // The prompt does not reach the model; only the reason does, so it can tell the user.
+          const notice = `The ${pluginName} plugin blocked the user's last prompt: ${blocked.reason ?? 'no reason given'}. Tell the user it was blocked and why. Do not act on it.`
+          return { ...decision, messages: [hookMessage('UserPromptSubmit', notice)] }
+        }
+        const text = results.flatMap((r) => r.context).filter(Boolean).join('\n\n')
+        if (!text) return decision
+        return { ...decision, messages: [...decision.messages, hookMessage('UserPromptSubmit', text)] }
+      })
     }
 
     if (byEvent('PreToolUse').length) {
@@ -674,9 +753,9 @@ export function createPlugin(spec) {
         const agent = exec.agent
         if (!agent) return next()
         const toolName = claudeToolName(exec.name)
-        const list = byEvent('PreToolUse').filter((hook) => matcherMatches(hook.matcher, toolName))
-        if (!list.length) return next()
-        const results = await fire('PreToolUse', agent, { tool_name: toolName, tool_input: toClaudeToolInput(exec.name, parseArguments(exec.arguments)), tool_use_id: String(exec.callId) }, (hook) => matcherMatches(hook.matcher, toolName))
+        const matches = (hook) => matcherMatches(hook.matcher, toolName)
+        if (!byEvent('PreToolUse').some(matches)) return next()
+        const results = await fire('PreToolUse', agent, { tool_name: toolName, tool_input: toClaudeToolInput(exec.name, parseArguments(exec.arguments)), tool_use_id: String(exec.callId) }, { filter: matches, signal: exec.signal })
         injectContext(agent, 'PreToolUse', results)
         const deny = results.find((r) => r.decision === 'deny' || r.decision === 'block')
         if (deny) return { kind: 'deny', reason: deny.reason || `denied by ${pluginName} hook` }
@@ -694,10 +773,11 @@ export function createPlugin(spec) {
         const agent = exec.agent
         if (!agent) return
         const toolName = claudeToolName(exec.name)
-        if (!byEvent('PostToolUse').some((hook) => matcherMatches(hook.matcher, toolName))) return
+        const matches = (hook) => matcherMatches(hook.matcher, toolName)
+        if (!byEvent('PostToolUse').some(matches)) return
         const output = (result?.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text).join('\n')
         const response = result?.isError ? { success: false, error: output } : { success: true, output }
-        fire('PostToolUse', agent, { tool_name: toolName, tool_input: toClaudeToolInput(exec.name, parseArguments(exec.arguments)), tool_response: response, tool_use_id: String(exec.callId) }, (hook) => matcherMatches(hook.matcher, toolName))
+        fire('PostToolUse', agent, { tool_name: toolName, tool_input: toClaudeToolInput(exec.name, parseArguments(exec.arguments)), tool_response: response, tool_use_id: String(exec.callId) }, { filter: matches })
           .then((results) => injectContext(agent, 'PostToolUse', results))
           .catch((error) => warn(`PostToolUse: ${error.message}`))
       })
@@ -709,22 +789,25 @@ export function createPlugin(spec) {
         const event = isSubagent(agent) ? 'SubagentStop' : 'Stop'
         if (!byEvent(event).length) return
         const active = stopBlocks.get(agent) === true
-        const results = await fire(event, agent, { stop_hook_active: active, last_assistant_message: lastAssistantText(agent.session) })
+        const results = await fire(event, agent, { stop_hook_active: active, last_assistant_message: lastAssistantText(agent.session) }, { signal })
         const block = results.find((r) => r.decision === 'block')
         if (block && !active) {
           stopBlocks.set(agent, true)
-          agent.steer({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: `<${pluginName}-hook event="${event}">\n${block.reason ?? 'A plugin hook asked for one more step.'}\n</${pluginName}-hook>` }], source: { kind: `plugin:${id}` } })
+          agent.steer(hookMessage(event, block.reason ?? 'A plugin hook asked for one more step.'))
         } else {
           stopBlocks.set(agent, false)
         }
       })
     }
 
-    if (byEvent('SessionEnd').length) {
-      ctx.on('agent/disposed', ({ agent }) => {
-        fire('SessionEnd', agent, { reason: 'other' }).catch((error) => warn(`SessionEnd: ${error.message}`))
+    ctx.on('agent/disposed', ({ agent }) => {
+      const done = byEvent('SessionEnd').length ? fire('SessionEnd', agent, { reason: 'other' }) : Promise.resolve()
+      done.catch((error) => warn(`SessionEnd: ${error.message}`)).finally(() => {
+        try {
+          dropTranscript(agent)
+        } catch {}
       })
-    }
+    })
   }
 
   return { name: id, apply }
