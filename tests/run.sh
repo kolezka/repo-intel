@@ -635,6 +635,13 @@ check "non-semver version fails nonzero" "$([ "$?" != 0 ]; echo $?)" "exit 0"
 jq -e '.version == "1.2"' "$pf" >/dev/null 2>&1
 check "non-semver version leaves the file untouched" $? "got: $(cat "$pf")"
 
+mkdir -p "$work/bump-dsh/.claude-plugin" "$work/bump-dsh/dsh"
+jq -n '{name: "repo-intel", version: "0.4.2"}' > "$work/bump-dsh/.claude-plugin/plugin.json"
+jq -n '{name: "@kolezka/repo-intel-dsh", version: "0.4.2", dependencies: {"claude-plugin-dsh": "0.1.0"}}' > "$work/bump-dsh/dsh/package.json"
+"$bump" patch "$work/bump-dsh/.claude-plugin/plugin.json" >/dev/null 2>&1
+jq -e '.version == "0.4.3" and .dependencies["claude-plugin-dsh"] == "0.1.0"' "$work/bump-dsh/dsh/package.json" >/dev/null 2>&1
+check "bump also moves the DSH adapter manifest to the new version" $? "got: $(cat "$work/bump-dsh/dsh/package.json")"
+
 # ---------------------------------------------------------------------------
 # build's exit-status contract (fix/build-exit-status). Kept as its own
 # section: graph.json presence/validity, the partial-parse count and --strict.

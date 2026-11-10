@@ -42,4 +42,9 @@ esac
 next="$major.$minor.$patch"
 
 jq --indent 2 --arg v "$next" '.version = $v' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+# The DSH adapter manifest next to .claude-plugin/ ships at the plugin version.
+adapter="$(dirname "$file")/../dsh/package.json"
+if [[ -f $adapter ]]; then
+  jq --indent 2 --arg v "$next" '.version = $v' "$adapter" > "$adapter.tmp" && mv "$adapter.tmp" "$adapter"
+fi
 printf '%s\n' "$next"
