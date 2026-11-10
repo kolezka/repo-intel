@@ -1,5 +1,5 @@
-// DeepSeek Harness entry for this Claude Code plugin. The plugin tree is read as is;
-// claude-compat.js is a vendored copy from kolezka/marketplace dsh-compat/, do not edit it here.
+// DeepSeek Harness entry for this Claude Code plugin.
+// Refresh the vendored runtime with claude-plugins-dsh sync.
 import { createPlugin, rootFrom } from './claude-compat.js'
 
 const plugin = createPlugin({
