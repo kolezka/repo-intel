@@ -1,0 +1,3 @@
+- insert:
+    - id: claude-compat-repo-intel
+      name: '@kolezka/repo-intel-dsh'

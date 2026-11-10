@@ -28,6 +28,32 @@ repo-intel migrate-hooks                 # dry run: old global hooks this plugin
 
 Requirements: `git`, `jq`, and `uv`/`pipx` plus `pnpm`/`npm` for the installs.
 
+### DeepSeek Harness
+
+The `dsh/` adapter imports the published `claude-plugin-dsh` runtime directly. Install
+its dependencies with Bun before adding it to a DSH profile:
+
+```bash
+cd /abs/path/to/repo-intel/dsh && bun install --frozen-lockfile
+dsh plugin --profile <profile> add file:/abs/path/to/repo-intel/dsh
+```
+
+Do not rely on `dsh plugin add` to install `claude-plugin-dsh` for you; that has not
+been checked. To check what the adapter registers without a DSH profile:
+
+```bash
+bun x claude-plugin-dsh@0.1.0 inspect /abs/path/to/repo-intel
+```
+
+Do not run the package's `sync` or `scaffold` commands on this adapter: in `0.1.0` they
+write a vendored `claude-compat.js`, which this adapter no longer uses. To move to a newer
+runtime, change the exact version in `dsh/package.json`, run `bun install` in `dsh/` to
+refresh `dsh/bun.lock`, then run `node --test tests/dsh.test.mjs`.
+
+The adapter registers the repo-intel skills, the routing instructions and the PreToolUse
+guard. It does not run the Claude Code SessionStart link hook. `scripts/bump-version.sh`
+keeps `dsh/package.json` at the plugin version.
+
 ## What the agent gets
 
 Routing lives in [`claude/CLAUDE.md`](claude/CLAUDE.md): codegraph for structure, graphify
@@ -154,6 +180,7 @@ A symlinked `settings.json` is edited through the link, so a dotfiles setup stay
 
 ```bash
 bash tests/run.sh
+node --test tests/dsh.test.mjs
 ```
 
 The tests use fake `graphify` and `codegraph` binaries and a temporary `HOME`; they never
