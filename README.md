@@ -28,6 +28,22 @@ repo-intel migrate-hooks                 # dry run: old global hooks this plugin
 
 Requirements: `git`, `jq`, and `uv`/`pipx` plus `pnpm`/`npm` for the installs.
 
+### DeepSeek Harness
+
+Add this checkout's bundle to a DSH profile:
+
+```sh
+dsh plugin --profile web add file:/absolute/path/to/repo-intel/dsh
+```
+
+The adapter exposes the prefixed skills, routing guidance, and build guard. It skips
+SessionStart, which only updates Claude Code's import link. Refresh the self-contained
+runtime with `claude-plugins-dsh sync /path/to/repo-intel` and check it with
+`claude-plugins-dsh sync --check /path/to/repo-intel`. This copy comes from
+[claude-plugins-dsh](https://github.com/kolezka/claude-plugins-dsh) commit
+`a721298862b4dd3244ce3b48a184f95c512dc700`; package version `0.1.0` alone does not
+identify that runtime.
+
 ## What the agent gets
 
 Routing lives in [`claude/CLAUDE.md`](claude/CLAUDE.md): codegraph for structure, graphify
@@ -154,6 +170,7 @@ A symlinked `settings.json` is edited through the link, so a dotfiles setup stay
 
 ```bash
 bash tests/run.sh
+node --test tests/dsh.test.mjs
 ```
 
 The tests use fake `graphify` and `codegraph` binaries and a temporary `HOME`; they never
