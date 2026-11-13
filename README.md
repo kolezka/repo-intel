@@ -42,10 +42,10 @@ Do not rely on `dsh plugin add` to install `claude-plugin-dsh` for you; that has
 been checked. To check what the adapter registers without a DSH profile:
 
 ```bash
-bun x claude-plugin-dsh@0.1.0 inspect /abs/path/to/repo-intel
+bun x claude-plugin-dsh@0.2.0 inspect /abs/path/to/repo-intel
 ```
 
-Do not run the package's `sync` or `scaffold` commands on this adapter: in `0.1.0` they
+Do not run the package's `sync` or `scaffold` commands on this adapter: in `0.2.0` they
 write a vendored `claude-compat.js`, which this adapter no longer uses. To move to a newer
 runtime, change the exact version in `dsh/package.json`, run `bun install` in `dsh/` to
 refresh `dsh/bun.lock`, then run `node --test tests/dsh.test.mjs`.
