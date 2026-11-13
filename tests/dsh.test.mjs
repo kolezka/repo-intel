@@ -27,7 +27,7 @@ try {
 test('standalone adapter loads the published runtime and registers useful content', async () => {
   assert.ok(existsSync(join(root, 'dsh/package.json')), 'adapter manifest must exist')
   const manifest = JSON.parse(readFileSync(join(root, 'dsh/package.json'), 'utf8'))
-  assert.equal(manifest.dependencies['claude-plugin-dsh'], '0.1.0')
+  assert.equal(manifest.dependencies['claude-plugin-dsh'], '0.2.0')
   assert.equal(manifest.version, JSON.parse(readFileSync(join(root, '.claude-plugin/plugin.json'), 'utf8')).version)
   assert.ok(!existsSync(join(root, 'dsh/claude-compat.js')))
   assert.match(readFileSync(join(root, 'dsh/index.js'), 'utf8'), /from ['"]claude-plugin-dsh['"]/)
@@ -39,7 +39,7 @@ test('standalone adapter loads the published runtime and registers useful conten
     const install = spawnSync('bun', ['install', '--frozen-lockfile'], { cwd: join(fixture, 'dsh'), encoding: 'utf8' })
     assert.equal(install.status, 0, `frozen install failed: ${install.stdout}\n${install.stderr}`)
     const dependency = resolveDependency(join(fixture, 'dsh'))
-    assert.equal(dependency.version, '0.1.0')
+    assert.equal(dependency.version, '0.2.0')
     assert.ok(dependency.path.startsWith(join(fixture, 'dsh/node_modules/claude-plugin-dsh/')), dependency.path)
     console.log(`installed runtime ${dependency.version}: ${dependency.path}`)
 
