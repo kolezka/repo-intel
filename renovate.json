@@ -1,0 +1,39 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Pinned claude-plugin-dsh version in Markdown commands",
+      "managerFilePatterns": [
+        "/\\.md$/"
+      ],
+      "matchStrings": [
+        "claude-plugin-dsh@(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "claude-plugin-dsh",
+      "datasourceTemplate": "npm"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Only track the DSH runtime",
+      "matchPackageNames": [
+        "*"
+      ],
+      "enabled": false
+    },
+    {
+      "matchPackageNames": [
+        "claude-plugin-dsh"
+      ],
+      "enabled": true,
+      "rangeStrategy": "pin",
+      "groupName": "claude-plugin-dsh",
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "dsh"
+    }
+  ]
+}

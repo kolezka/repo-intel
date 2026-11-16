@@ -5,11 +5,11 @@
     "": {
       "name": "@kolezka/repo-intel-dsh",
       "dependencies": {
-        "claude-plugin-dsh": "0.2.0",
+        "claude-plugin-dsh": "0.2.1",
       },
     },
   },
   "packages": {
-    "claude-plugin-dsh": ["claude-plugin-dsh@0.2.0", "", { "bin": { "claude-plugin-dsh": "dist/bin/cli.js", "claude-plugins-dsh": "dist/bin/cli.js" } }, "sha512-pzSobglwIh7NuG5Y5W331kVIg5NExU5wnzW3citMKXl57CMmVW255b5zPLDyVA/ERSgUjhrsugBgkEq5p+S1Zw=="],
+    "claude-plugin-dsh": ["claude-plugin-dsh@0.2.1", "", { "bin": { "claude-plugin-dsh": "dist/bin/cli.js", "claude-plugins-dsh": "dist/bin/cli.js" } }, "sha512-GfPNc7F7uY6QVW3BeLqpRcuWB6dDajatud2EjTiBFtQjwtrORrMBTPrWDmdO8wzFUHAynvQ0Ndp4OE/cycyIoQ=="],
   }
 }
